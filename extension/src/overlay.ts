@@ -18,6 +18,7 @@ export interface OverlayState {
   activeTab: 'transcript' | 'mapping' | 'settings';
   transcriptLines: TranscriptLine[];
   patientInfo: PatientInfo | null;
+  tabId: string | null;
 }
 
 export interface TranscriptLine {
@@ -26,6 +27,7 @@ export interface TranscriptLine {
   text: string;
   timestamp: number;
   isFinal: boolean;
+  tabId?: string | number;
 }
 
 export interface PatientInfo {
@@ -74,7 +76,8 @@ export class FerrariOverlay {
       isConnected: false,
       activeTab: 'transcript',
       transcriptLines: [],
-      patientInfo: null
+      patientInfo: null,
+      tabId: null
     };
   }
 
@@ -120,6 +123,10 @@ export class FerrariOverlay {
     }
   }
 
+  public setTabId(tabId: number | string): void {
+    this.setState({ tabId: String(tabId) });
+  }
+
   private handleTabChange(tab: OverlayState['activeTab']): void {
     this.setState({ activeTab: tab });
   }
@@ -148,6 +155,11 @@ export class FerrariOverlay {
   }
 
   private addTranscriptLine(line: TranscriptLine): void {
+    const incomingTabId = line.tabId !== undefined ? String(line.tabId) : null;
+    if (this.state.tabId && incomingTabId && incomingTabId !== this.state.tabId) {
+      return;
+    }
+
     const lines = [...this.state.transcriptLines];
 
     // Update existing line if not final, or add new

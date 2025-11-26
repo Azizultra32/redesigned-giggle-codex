@@ -34,16 +34,28 @@ export class AudioCapture {
   private _isRecording: boolean = false;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 5;
+  private tabId: number | null = null;
+  private patientHint?: string;
 
   constructor(bridge: Bridge, config: Partial<AudioCaptureConfig> = {}) {
     this.bridge = bridge;
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  public async start(): Promise<void> {
+  public setTabId(tabId: number): void {
+    this.tabId = tabId;
+  }
+
+  public async start(patientHint?: string): Promise<void> {
     if (this._isRecording) {
       console.warn('[AudioCapture] Already recording');
       return;
+    }
+
+    this.patientHint = patientHint;
+
+    if (this.tabId === null) {
+      throw new Error('Tab ID not available for audio binding');
     }
 
     console.log('[AudioCapture] Starting audio capture...');
@@ -67,6 +79,9 @@ export class AudioCapture {
 
       // Connect to websocket
       await this.connectWebSocket();
+
+      // Inform backend about the active tab and bind audio stream
+      this.sendBindAudio();
 
       // Setup audio processing pipeline
       await this.setupAudioPipeline();
@@ -112,6 +127,7 @@ export class AudioCapture {
         console.log('[AudioCapture] WebSocket connected');
         this.reconnectAttempts = 0;
         this.bridge.emit('connection', { connected: true });
+        this.sendHello();
         resolve();
       };
 
@@ -152,6 +168,7 @@ export class AudioCapture {
     setTimeout(async () => {
       try {
         await this.connectWebSocket();
+        this.sendBindAudio();
       } catch (error) {
         console.error('[AudioCapture] Reconnection failed:', error);
       }
@@ -162,6 +179,14 @@ export class AudioCapture {
     try {
       const message = JSON.parse(data);
 
+      const incomingTabId = message.tabId !== undefined ? String(message.tabId) : null;
+      const localTabId = this.tabId !== null ? String(this.tabId) : null;
+
+      if (incomingTabId && localTabId && incomingTabId !== localTabId) {
+        console.debug('[AudioCapture] Ignoring message for non-active tab', incomingTabId);
+        return;
+      }
+
       switch (message.type) {
         case 'transcript':
           this.bridge.emit('transcript', {
@@ -169,7 +194,8 @@ export class AudioCapture {
             speaker: message.speaker || 'Unknown',
             text: message.text,
             timestamp: message.timestamp || Date.now(),
-            isFinal: message.is_final ?? true
+            isFinal: message.is_final ?? message.isFinal ?? true,
+            tabId: message.tabId
           });
           break;
 
@@ -188,6 +214,32 @@ export class AudioCapture {
     } catch (error) {
       console.error('[AudioCapture] Failed to parse message:', error);
     }
+  }
+
+  private sendHello(): void {
+    if (this.websocket?.readyState !== WebSocket.OPEN) return;
+
+    this.websocket.send(
+      JSON.stringify({
+        type: 'hello',
+        tabId: this.tabId ?? undefined,
+        url: window.location.href,
+        title: document.title,
+        patientHint: this.patientHint
+      })
+    );
+  }
+
+  private sendBindAudio(): void {
+    if (this.websocket?.readyState !== WebSocket.OPEN) return;
+
+    this.websocket.send(
+      JSON.stringify({
+        type: 'bind_audio',
+        tabId: this.tabId ?? undefined,
+        patientHint: this.patientHint
+      })
+    );
   }
 
   private async setupAudioPipeline(): Promise<void> {

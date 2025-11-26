@@ -38,7 +38,7 @@ async function initializeOverlay(): Promise<void> {
     overlay.mount();
 
     // Setup bridge handlers
-    setupBridgeHandlers(bridge, audioCapture, domMapper);
+    setupBridgeHandlers(bridge, audioCapture, domMapper, overlay);
 
     // Connect to background service worker
     await bridge.connect();
@@ -52,12 +52,19 @@ async function initializeOverlay(): Promise<void> {
 function setupBridgeHandlers(
   bridge: Bridge,
   audioCapture: AudioCapture,
-  domMapper: DOMMapper
+  domMapper: DOMMapper,
+  overlay: FerrariOverlay
 ): void {
+  bridge.on('tab-info', (info: { tabId: number }) => {
+    audioCapture.setTabId(info.tabId);
+    overlay.setTabId(info.tabId);
+  });
+
   // Handle recording commands
   bridge.on('start-recording', async () => {
     try {
-      await audioCapture.start();
+      const patientInfo = domMapper.extractPatientInfo();
+      await audioCapture.start(patientInfo?.name || patientInfo?.mrn);
       bridge.emit('recording-started', {});
     } catch (error) {
       console.error('[GHOST-NEXT] Failed to start recording:', error);
