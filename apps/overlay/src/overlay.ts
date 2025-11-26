@@ -10,7 +10,8 @@ import { ControlButtons } from './ui/buttons';
 import { TabsComponent } from './ui/tabs';
 import { StatusPills } from './ui/pills';
 import { Bridge } from './bridge';
-import { DOMMapper, PatientInfo } from './domMapper';
+import { DOMMapper, FieldSummary, PatientInfo } from './domMapper';
+import { MappingPanel } from './ui/mappingPanel';
 
 export interface OverlayState {
   isVisible: boolean;
@@ -21,6 +22,7 @@ export interface OverlayState {
   transcriptLines: TranscriptLine[];
   patientInfo: PatientInfo | null;
   warnings: string[];
+  mapping: { fields: FieldSummary[]; lastUpdated: number | null };
 }
 
 export interface TranscriptLine {
@@ -47,7 +49,8 @@ export class FerrariOverlay {
   private controlButtons: ControlButtons;
   private tabs: TabsComponent;
   private statusPills: StatusPills;
-  private utteranceBuffers: Map<string, { id: string; createdAt: number; timeout?: ReturnType<typeof setTimeout> }>; 
+  private mappingPanel: MappingPanel;
+  private utteranceBuffers: Map<string, { id: string; createdAt: number; timeout?: ReturnType<typeof setTimeout> }>;
   private bufferWindowMs = 32000; // Allow for ChunkAssembler window (~30s) before auto-finalizing
 
   constructor(bridge: Bridge, domMapper: DOMMapper, tabId: string) {
@@ -68,6 +71,7 @@ export class FerrariOverlay {
     this.controlButtons = new ControlButtons(this.shadowRoot, this.handleControlAction.bind(this));
     this.tabs = new TabsComponent(this.shadowRoot, this.handleTabChange.bind(this));
     this.statusPills = new StatusPills(this.shadowRoot);
+    this.mappingPanel = new MappingPanel(this.shadowRoot);
     this.utteranceBuffers = new Map();
 
     this.setupEventListeners();
@@ -83,7 +87,8 @@ export class FerrariOverlay {
       activeTab: 'transcript',
       transcriptLines: [],
       patientInfo: null,
-      warnings: []
+      warnings: [],
+      mapping: { fields: [], lastUpdated: null }
     };
   }
 
@@ -105,6 +110,17 @@ export class FerrariOverlay {
       this.setState({ patientInfo: info });
     });
 
+    this.bridge.on(
+      'fields-detected',
+      (data: { fields: FieldSummary[]; patientHint?: PatientInfo | null; tabId?: string }) => {
+        if (data.tabId && data.tabId !== this.tabId) return;
+        this.setState({
+          mapping: { fields: data.fields || [], lastUpdated: Date.now() },
+          patientInfo: data.patientHint || this.state.patientInfo
+        });
+      }
+    );
+
     this.bridge.on('active_tab_changed', (data: { tabId?: string; isActive: boolean }) => {
       if (data.tabId && data.tabId !== this.tabId) return;
       this.setState({ isActive: data.isActive });
@@ -120,6 +136,13 @@ export class FerrariOverlay {
       if (data.tabId && data.tabId !== this.tabId) return;
       const warning = data.error || 'Unexpected server error from Deepgram feed.';
       this.setState({ warnings: Array.from(new Set([...this.state.warnings, warning])) });
+    });
+
+    this.bridge.on('smart-fill-result', (data: { success: boolean; message: string; tabId?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      if (!data.success) {
+        this.setState({ warnings: Array.from(new Set([...this.state.warnings, data.message])) });
+      }
     });
 
     // Keyboard shortcut to toggle overlay
@@ -280,6 +303,12 @@ export class FerrariOverlay {
       isActive: this.state.isActive
     });
 
+    this.mappingPanel.update({
+      fields: this.state.mapping.fields,
+      lastUpdated: this.state.mapping.lastUpdated,
+      patient: this.state.patientInfo
+    });
+
     this.tabs.setActiveTab(this.state.activeTab);
 
     this.updateBanner();
@@ -328,7 +357,6 @@ export class FerrariOverlay {
       <div class="overlay-content">
         <div class="tab-panel" id="transcript-panel"></div>
         <div class="tab-panel hidden" id="mapping-panel">
-          <p>DOM field mapping controls</p>
         </div>
         <div class="tab-panel hidden" id="settings-panel">
           <p>Settings and configuration</p>
@@ -343,11 +371,13 @@ export class FerrariOverlay {
     const pillsContainer = this.shadowRoot.getElementById('status-pills');
     const tabsContainer = this.shadowRoot.getElementById('tabs-container');
     const transcriptPanel = this.shadowRoot.getElementById('transcript-panel');
+    const mappingPanel = this.shadowRoot.getElementById('mapping-panel');
     const controlsContainer = this.shadowRoot.getElementById('control-buttons');
 
     if (pillsContainer) this.statusPills.mount(pillsContainer);
     if (tabsContainer) this.tabs.mount(tabsContainer);
     if (transcriptPanel) this.transcriptView.mount(transcriptPanel);
+    if (mappingPanel) this.mappingPanel.mount(mappingPanel);
     if (controlsContainer) this.controlButtons.mount(controlsContainer);
 
     // Setup minimize button

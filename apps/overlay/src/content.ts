@@ -11,6 +11,7 @@ import { FerrariOverlay } from './overlay';
 import { Bridge } from './bridge';
 import { AudioCapture } from './audio-capture';
 import { DOMMapper, DetectedField } from './domMapper';
+import { SmartFillExecutor, SmartFillStep } from './smartFill';
 
 // Prevent multiple injections
 if ((window as any).__GHOST_NEXT_INJECTED__) {
@@ -34,13 +35,14 @@ async function initializeOverlay(): Promise<void> {
 
     // Initialize DOM mapper for field detection
     const domMapper = new DOMMapper(bridge);
+    const smartFillExecutor = new SmartFillExecutor(domMapper, bridge);
 
     // Create and mount the overlay
     const overlay = new FerrariOverlay(bridge, domMapper, tabId);
     overlay.mount();
 
     // Setup bridge handlers
-    setupBridgeHandlers(bridge, audioCapture, domMapper, tabId);
+    setupBridgeHandlers(bridge, audioCapture, domMapper, smartFillExecutor, tabId);
 
     // Connect to background service worker
     await bridge.connect();
@@ -57,6 +59,7 @@ function setupBridgeHandlers(
   bridge: Bridge,
   audioCapture: AudioCapture,
   domMapper: DOMMapper,
+  smartFillExecutor: SmartFillExecutor,
   localTabId: string
 ): void {
   // Handle recording commands
@@ -83,8 +86,12 @@ function setupBridgeHandlers(
 
   // Handle DOM mapping commands
   bridge.on('map-fields', () => {
-    const fields = domMapper.detectFields();
-    bridge.emit('fields-detected', { fields, tabId: localTabId });
+    const snapshot = domMapper.getMappingSnapshot();
+    bridge.emit('fields-detected', { ...snapshot, tabId: localTabId });
+
+    if (snapshot.patientHint) {
+      bridge.emit('patient', { ...snapshot.patientHint, tabId: localTabId });
+    }
   });
 
   bridge.on('get-patient-info', () => {
@@ -94,6 +101,23 @@ function setupBridgeHandlers(
     } else {
       bridge.emit('patient', { tabId: localTabId });
     }
+  });
+
+  bridge.on('smart-fill-steps', async (payload: { steps?: SmartFillStep[]; requestId?: string; tabId?: string }) => {
+    if (payload?.tabId && payload.tabId !== localTabId) return;
+    if (!payload?.steps?.length) {
+      await bridge.emit('smart-fill-result', {
+        success: false,
+        message: 'No Smart Fill steps provided.',
+        steps: [],
+        requestId: payload?.requestId,
+        tabId: localTabId
+      });
+      return;
+    }
+
+    const result = await smartFillExecutor.execute(payload.steps, payload.requestId);
+    await bridge.emit('smart-fill-result', { ...result, tabId: localTabId });
   });
 
   bridge.on('mcp-fill-sample', async (payload: { value?: string; requestId?: string; tabId?: string }) => {
