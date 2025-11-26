@@ -175,6 +175,13 @@ export class DOMMapper {
   }
 
   /**
+   * Lightweight accessor for patient hints without mutating state.
+   */
+  public getPatientHints(): PatientInfo | null {
+    return this.extractPatientInfo();
+  }
+
+  /**
    * Set a value into a detected field
    */
   public setFieldValue(fieldId: string, value: string): boolean {

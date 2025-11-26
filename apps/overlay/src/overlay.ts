@@ -10,14 +10,17 @@ import { ControlButtons } from './ui/buttons';
 import { TabsComponent } from './ui/tabs';
 import { StatusPills } from './ui/pills';
 import { Bridge } from './bridge';
+import { DOMMapper, PatientInfo } from './domMapper';
 
 export interface OverlayState {
   isVisible: boolean;
   isRecording: boolean;
   isConnected: boolean;
+  isActive: boolean;
   activeTab: 'transcript' | 'mapping' | 'settings';
   transcriptLines: TranscriptLine[];
   patientInfo: PatientInfo | null;
+  warnings: string[];
 }
 
 export interface TranscriptLine {
@@ -26,12 +29,7 @@ export interface TranscriptLine {
   text: string;
   timestamp: number;
   isFinal: boolean;
-}
-
-export interface PatientInfo {
-  name: string;
-  mrn: string;
-  dob?: string;
+  tabId?: string;
 }
 
 export class FerrariOverlay {
@@ -39,6 +37,8 @@ export class FerrariOverlay {
   private container: HTMLElement;
   private state: OverlayState;
   private bridge: Bridge;
+  private domMapper: DOMMapper;
+  private tabId: string;
 
   // UI Components
   private transcriptView: TranscriptView;
@@ -46,8 +46,10 @@ export class FerrariOverlay {
   private tabs: TabsComponent;
   private statusPills: StatusPills;
 
-  constructor(bridge: Bridge) {
+  constructor(bridge: Bridge, domMapper: DOMMapper, tabId: string) {
     this.bridge = bridge;
+    this.domMapper = domMapper;
+    this.tabId = tabId;
     this.state = this.getInitialState();
 
     // Create host element
@@ -72,24 +74,40 @@ export class FerrariOverlay {
       isVisible: true,
       isRecording: false,
       isConnected: false,
+      isActive: true,
       activeTab: 'transcript',
       transcriptLines: [],
-      patientInfo: null
+      patientInfo: null,
+      warnings: []
     };
   }
 
   private setupEventListeners(): void {
     // Listen for bridge events
-    this.bridge.on('transcript', (data: TranscriptLine) => {
+    this.bridge.on('transcript', (data: TranscriptLine & { tabId?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
       this.addTranscriptLine(data);
     });
 
-    this.bridge.on('connection', (status: { connected: boolean }) => {
+    this.bridge.on('connection', (status: { connected: boolean; tabId?: string }) => {
+      if (status.tabId && status.tabId !== this.tabId) return;
       this.setState({ isConnected: status.connected });
     });
 
-    this.bridge.on('patient', (info: PatientInfo) => {
+    this.bridge.on('patient', (info: PatientInfo & { tabId?: string }) => {
+      if (info.tabId && info.tabId !== this.tabId) return;
       this.setState({ patientInfo: info });
+    });
+
+    this.bridge.on('active_tab_changed', (data: { tabId?: string; isActive: boolean }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.setState({ isActive: data.isActive });
+    });
+
+    this.bridge.on('patient-mismatch', (data: { tabId?: string; message?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      const warning = data.message || 'Patient mismatch detected. Verify patient before recording.';
+      this.setState({ warnings: Array.from(new Set([...this.state.warnings, warning])) });
     });
 
     // Keyboard shortcut to toggle overlay
@@ -125,8 +143,15 @@ export class FerrariOverlay {
   }
 
   private async startRecording(): Promise<void> {
+    if (!this.state.isActive) {
+      this.setState({
+        warnings: Array.from(new Set([...this.state.warnings, 'Activate this tab to start recording.']))
+      });
+      return;
+    }
+
     try {
-      await this.bridge.emit('start-recording', {});
+      await this.bridge.emit('start-recording', { tabId: this.tabId });
       this.setState({ isRecording: true });
     } catch (error) {
       console.error('[Ferrari] Failed to start recording:', error);
@@ -135,7 +160,7 @@ export class FerrariOverlay {
 
   private async stopRecording(): Promise<void> {
     try {
-      await this.bridge.emit('stop-recording', {});
+      await this.bridge.emit('stop-recording', { tabId: this.tabId });
       this.setState({ isRecording: false });
     } catch (error) {
       console.error('[Ferrari] Failed to stop recording:', error);
@@ -169,13 +194,21 @@ export class FerrariOverlay {
 
   private setState(partial: Partial<OverlayState>): void {
     this.state = { ...this.state, ...partial };
+
+    if (partial.isActive) {
+      this.state.warnings = this.state.warnings.filter(
+        warning => warning !== 'Activate this tab to start recording.'
+      );
+    }
+
     this.updateUI();
   }
 
   private updateUI(): void {
     this.controlButtons.update({
       isRecording: this.state.isRecording,
-      isConnected: this.state.isConnected
+      isConnected: this.state.isConnected,
+      isActive: this.state.isActive
     });
 
     this.statusPills.update({
@@ -185,6 +218,25 @@ export class FerrariOverlay {
     });
 
     this.tabs.setActiveTab(this.state.activeTab);
+
+    this.updateBanner();
+  }
+
+  public async sendHello(): Promise<void> {
+    const patientHints = this.domMapper.getPatientHints();
+    try {
+      await this.bridge.emit('hello', {
+        tabId: this.tabId,
+        url: window.location.href,
+        patientHints
+      });
+
+      if (patientHints) {
+        this.setState({ patientInfo: patientHints });
+      }
+    } catch (error) {
+      console.error('[Ferrari] Failed to send hello message:', error);
+    }
   }
 
   private render(): void {
@@ -207,6 +259,7 @@ export class FerrariOverlay {
           <button class="minimize-btn" title="Minimize (Alt+G)">−</button>
         </div>
       </div>
+      <div class="overlay-banner hidden" id="overlay-banner"></div>
       <div class="overlay-tabs" id="tabs-container"></div>
       <div class="overlay-content">
         <div class="tab-panel" id="transcript-panel"></div>
@@ -236,6 +289,33 @@ export class FerrariOverlay {
     // Setup minimize button
     const minimizeBtn = this.shadowRoot.querySelector('.minimize-btn');
     minimizeBtn?.addEventListener('click', () => this.toggleVisibility());
+  }
+
+  private updateBanner(): void {
+    const banner = this.shadowRoot.getElementById('overlay-banner');
+    if (!banner) return;
+
+    const messages: string[] = [];
+    if (!this.state.isActive) {
+      messages.push('This tab is inactive. Recording controls are disabled.');
+    }
+
+    const filteredWarnings = this.state.isActive
+      ? this.state.warnings.filter(warning => warning !== 'Activate this tab to start recording.')
+      : this.state.warnings;
+
+    if (filteredWarnings.length > 0) {
+      messages.push(...filteredWarnings);
+    }
+
+    if (messages.length === 0) {
+      banner.classList.add('hidden');
+      banner.textContent = '';
+      return;
+    }
+
+    banner.textContent = messages.join(' • ');
+    banner.classList.remove('hidden');
   }
 
   private getStyles(): string {
@@ -303,6 +383,18 @@ export class FerrariOverlay {
 
       .header-controls button:hover {
         background: rgba(255, 255, 255, 0.3);
+      }
+
+      .overlay-banner {
+        background: #2d2d44;
+        color: #ffcc80;
+        padding: 8px 12px;
+        font-size: 12px;
+        border-bottom: 1px solid #3d3d5c;
+      }
+
+      .overlay-banner.hidden {
+        display: none;
       }
 
       .overlay-tabs {

@@ -24,6 +24,7 @@ const DEFAULT_CONFIG: AudioCaptureConfig = {
 export class AudioCapture {
   private config: AudioCaptureConfig;
   private bridge: Bridge;
+  private tabId: string;
 
   private mediaStream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
@@ -35,9 +36,10 @@ export class AudioCapture {
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 5;
 
-  constructor(bridge: Bridge, config: Partial<AudioCaptureConfig> = {}) {
+  constructor(bridge: Bridge, config: Partial<AudioCaptureConfig> = {}, tabId: string = '') {
     this.bridge = bridge;
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.tabId = tabId;
   }
 
   public async start(): Promise<void> {
@@ -111,7 +113,7 @@ export class AudioCapture {
       this.websocket.onopen = () => {
         console.log('[AudioCapture] WebSocket connected');
         this.reconnectAttempts = 0;
-        this.bridge.emit('connection', { connected: true });
+        this.bridge.emit('connection', { connected: true, tabId: this.tabId });
         resolve();
       };
 
@@ -122,7 +124,7 @@ export class AudioCapture {
 
       this.websocket.onclose = (event) => {
         console.log('[AudioCapture] WebSocket closed:', event.code, event.reason);
-        this.bridge.emit('connection', { connected: false });
+        this.bridge.emit('connection', { connected: false, tabId: this.tabId });
 
         // Attempt reconnection if still recording
         if (this._isRecording && this.reconnectAttempts < this.maxReconnectAttempts) {
@@ -169,13 +171,21 @@ export class AudioCapture {
             speaker: message.speaker || 'Unknown',
             text: message.text,
             timestamp: message.timestamp || Date.now(),
-            isFinal: message.is_final ?? true
+            isFinal: message.is_final ?? true,
+            tabId: message.tabId || message.tab_id || this.tabId
+          });
+          break;
+
+        case 'patient_mismatch':
+          this.bridge.emit('patient-mismatch', {
+            tabId: message.tabId || message.tab_id || this.tabId,
+            message: message.message || 'Patient mismatch detected from backend.'
           });
           break;
 
         case 'error':
           console.error('[AudioCapture] Server error:', message.error);
-          this.bridge.emit('server-error', { error: message.error });
+          this.bridge.emit('server-error', { error: message.error, tabId: this.tabId });
           break;
 
         case 'status':
