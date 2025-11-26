@@ -37,15 +37,31 @@ export interface DeepgramConsumerConfig {
   onClose: () => void;
 }
 
+interface ConnectOptions {
+  /**
+   * If true, request Deepgram VAD events. If false, skip VAD to harden against
+   * upstream glitches. The consumer will fall back to false automatically if
+   * the VAD-enabled connection fails during setup.
+   */
+  useVad: boolean;
+  /**
+   * Label used for console diagnostics so we can see whether we connected with
+   * or without VAD.
+   */
+  attemptLabel: string;
+}
+
 export class DeepgramConsumer {
   private client: ReturnType<typeof createClient> | null = null;
   private connection: LiveClient | null = null;
   private config: DeepgramConsumerConfig;
   private aggregator: ChunkAggregator;
   private isConnected = false;
+  private preferVad: boolean;
 
   constructor(config: DeepgramConsumerConfig) {
     this.config = config;
+    this.preferVad = process.env.DEEPGRAM_ENABLE_VAD !== 'false';
     this.aggregator = new ChunkAggregator({
       maxDurationSeconds: 30,
       onChunkComplete: config.onChunk
@@ -58,7 +74,28 @@ export class DeepgramConsumer {
       throw new Error('DEEPGRAM_API_KEY environment variable not set');
     }
 
-    console.log('[Deepgram] Connecting to streaming API...');
+    // First attempt with VAD (preferred). If initialization fails before the
+    // connection opens, retry once without VAD so audio flow is never blocked
+    // by upstream VAD issues.
+    try {
+      await this.establishConnection({ useVad: this.preferVad, attemptLabel: 'primary' });
+    } catch (primaryError) {
+      if (this.preferVad) {
+        console.warn('[Deepgram] Primary (VAD) connection failed, retrying without VAD', primaryError);
+        await this.establishConnection({ useVad: false, attemptLabel: 'fallback-no-vad' });
+      } else {
+        throw primaryError;
+      }
+    }
+  }
+
+  private establishConnection(options: ConnectOptions): Promise<void> {
+    const apiKey = process.env.DEEPGRAM_API_KEY;
+    if (!apiKey) {
+      throw new Error('DEEPGRAM_API_KEY environment variable not set');
+    }
+
+    console.log(`[Deepgram] Connecting (${options.attemptLabel}) to streaming API...`);
     this.client = createClient(apiKey);
 
     this.connection = this.client.listen.live({
@@ -69,7 +106,7 @@ export class DeepgramConsumer {
       diarize: true,
       interim_results: true,
       utterance_end_ms: 1000,
-      vad_events: true,
+      vad_events: options.useVad,
       encoding: 'linear16',
       sample_rate: 16000,
       channels: 1
@@ -85,7 +122,7 @@ export class DeepgramConsumer {
       this.connection!.on(LiveTranscriptionEvents.Open, () => {
         clearTimeout(timeout);
         this.isConnected = true;
-        console.log('[Deepgram] Connected');
+        console.log(`[Deepgram] Connected (${options.attemptLabel})${options.useVad ? ' with VAD' : ' without VAD'}`);
         resolve();
       });
 
@@ -93,7 +130,10 @@ export class DeepgramConsumer {
         clearTimeout(timeout);
         console.error('[Deepgram] Error:', error);
         this.config.onError(error);
-        if (!this.isConnected) reject(error);
+        if (!this.isConnected) {
+          this.teardownConnection();
+          reject(error);
+        }
       });
 
       this.connection!.on(LiveTranscriptionEvents.Transcript, (data: any) => {
@@ -133,6 +173,18 @@ export class DeepgramConsumer {
       this.connection = null;
       this.isConnected = false;
     }
+  }
+
+  private teardownConnection(): void {
+    if (this.connection) {
+      try {
+        this.connection.finish();
+      } catch (error) {
+        console.warn('[Deepgram] Failed to finish connection during teardown', error);
+      }
+      this.connection = null;
+    }
+    this.isConnected = false;
   }
 
   getConnectionState(): boolean {
