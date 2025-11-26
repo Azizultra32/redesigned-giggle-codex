@@ -19,7 +19,8 @@ import {
   AlertMessage,
   CommandMessage,
   CommandPayload,
-  WsMessage
+  WsMessage,
+  ActiveTabChangedMessage
 } from '../types/index.js';
 
 interface FeedState {
@@ -82,7 +83,7 @@ export class WsBridge {
   /**
    * Update feed status and broadcast to all clients
    */
-  updateFeedStatus(feedId: FeedId, status: FeedStatus): void {
+  updateFeedStatus(feedId: FeedId, status: FeedStatus, tabId?: string): void {
     const state = this.feedStates.get(feedId);
     if (!state) {
       console.warn(`[WsBridge] Unknown feed: ${feedId}`);
@@ -98,7 +99,8 @@ export class WsBridge {
         feed: state.feed,
         label: state.label,
         status: state.status,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        tabId
       }
     };
 
@@ -109,11 +111,12 @@ export class WsBridge {
   /**
    * Broadcast a transcript event (Feed A)
    */
-  broadcastTranscript(text: string, isFinal: boolean, confidence: number, speaker: number): void {
+  broadcastTranscript(text: string, isFinal: boolean, confidence: number, speaker: number, tabId?: string): void {
     const message: TranscriptMessage = {
       type: 'transcript',
       data: {
         feed: 'A',
+        tabId,
         text,
         isFinal,
         confidence,
@@ -131,12 +134,14 @@ export class WsBridge {
     feedId: FeedId,
     severity: 'critical' | 'warning' | 'info',
     message: string,
-    keywords?: string[]
+    keywords?: string[],
+    tabId?: string
   ): void {
     const alertMessage: AlertMessage = {
       type: 'alert',
       data: {
         feed: feedId,
+        tabId,
         severity,
         message,
         keywords,
@@ -151,14 +156,33 @@ export class WsBridge {
    */
   broadcastCommand(
     command: 'trigger_map' | 'smart_fill' | 'undo_fill' | 'dictate',
-    payload?: CommandPayload
+    payload?: CommandPayload,
+    tabId?: string
   ): void {
     const message: CommandMessage = {
       type: 'command',
       data: {
         feed: 'B',
+        tabId,
         command,
         payload,
+        timestamp: new Date().toISOString()
+      }
+    };
+    this.broadcast(message);
+  }
+
+  /**
+   * Broadcast when a user's active tab changes
+   */
+  broadcastActiveTabChange(userId: string, tabId: string, tabTitle?: string, tabUrl?: string): void {
+    const message: ActiveTabChangedMessage = {
+      type: 'active_tab_changed',
+      data: {
+        userId,
+        tabId,
+        tabTitle,
+        tabUrl,
         timestamp: new Date().toISOString()
       }
     };

@@ -25,7 +25,7 @@ import {
   getLatestTranscript,
   generateEphemeralPatientCode
 } from './lib/supabase.js';
-import { TranscriptChunk, TranscriptEvent, DomMap } from './types/index.js';
+import { TranscriptChunk, TranscriptEvent, DomMap, PatientHints, TranscriptRun } from './types/index.js';
 
 // Load environment variables
 config();
@@ -175,14 +175,21 @@ const wss = new WebSocketServer({
 interface Session {
   ws: WebSocket;
   userId: string;
+  tabId?: string;
+  tabTitle?: string;
+  tabUrl?: string;
+  patientHints?: PatientHints;
   transcriptId: number | null;
   deepgram: DeepgramConsumer | null;
   pendingChunks: TranscriptChunk[];
   isRecording: boolean;
   saveTimer: NodeJS.Timeout | null;
+  isActiveTab: boolean;
 }
 
 const sessions = new Map<WebSocket, Session>();
+const userSessions = new Map<string, Map<string, Session>>();
+const activeTabs = new Map<string, string>();
 
 wss.on('connection', (ws: WebSocket, req) => {
   const url = new URL(req.url || '', 'http://localhost');
@@ -194,11 +201,16 @@ wss.on('connection', (ws: WebSocket, req) => {
   const session: Session = {
     ws,
     userId,
+    tabId: undefined,
+    tabTitle: undefined,
+    tabUrl: undefined,
+    patientHints: undefined,
     transcriptId: null,
     deepgram: null,
     pendingChunks: [],
     isRecording: false,
-    saveTimer: null
+    saveTimer: null,
+    isActiveTab: false
   };
 
   sessions.set(ws, session);
@@ -215,6 +227,7 @@ wss.on('connection', (ws: WebSocket, req) => {
   ws.on('close', () => {
     console.log(`[Server] WebSocket disconnected: ${userId}`);
     cleanupSession(session);
+    unregisterSession(session);
     sessions.delete(ws);
   });
 
@@ -222,6 +235,7 @@ wss.on('connection', (ws: WebSocket, req) => {
   ws.on('error', (error) => {
     console.error('[Server] WebSocket error:', error);
     cleanupSession(session);
+    unregisterSession(session);
   });
 
   // Send welcome message
@@ -234,8 +248,14 @@ wss.on('connection', (ws: WebSocket, req) => {
 async function handleMessage(session: Session, data: any): Promise<void> {
   // Binary data = audio
   if (Buffer.isBuffer(data)) {
+    if (!ensureActiveTab(session, 'audio')) {
+      return;
+    }
+
     if (session.deepgram && session.isRecording) {
       session.deepgram.sendAudio(data);
+    } else {
+      send(session.ws, { type: 'error', error: 'No active recording for this tab' });
     }
     return;
   }
@@ -255,12 +275,24 @@ async function handleMessage(session: Session, data: any): Promise<void> {
  */
 async function handleCommand(session: Session, message: any): Promise<void> {
   switch (message.type) {
+    case 'hello':
+      await handleHello(session, message);
+      break;
+
+    case 'bind_audio':
+      handleBindAudio(session, message);
+      break;
+
     case 'start_recording':
-      await startRecording(session, message);
+      if (ensureActiveTab(session, 'start_recording')) {
+        await startRecording(session, message);
+      }
       break;
 
     case 'stop_recording':
-      await stopRecording(session);
+      if (ensureActiveTab(session, 'stop_recording')) {
+        await stopRecording(session);
+      }
       break;
 
     case 'ping':
@@ -273,6 +305,61 @@ async function handleCommand(session: Session, message: any): Promise<void> {
 }
 
 /**
+ * Handle initial hello message to register tab context and patient hints
+ */
+async function handleHello(session: Session, message: any): Promise<void> {
+  const tabId = message.tabId as string | undefined;
+
+  if (!tabId) {
+    send(session.ws, { type: 'error', error: 'Missing tabId in hello message' });
+    return;
+  }
+
+  session.tabId = tabId;
+  session.tabTitle = message.title || message.tabTitle;
+  session.tabUrl = message.url || message.tabUrl;
+  session.patientHints = mergePatientHints(session, message.patientHints, message);
+
+  registerSession(session);
+
+  if (!activeTabs.has(session.userId)) {
+    setActiveTab(session.userId, tabId, session);
+  } else {
+    session.isActiveTab = activeTabs.get(session.userId) === tabId;
+  }
+
+  send(session.ws, {
+    type: 'hello_ack',
+    tabId,
+    isActive: session.isActiveTab,
+    title: session.tabTitle,
+    url: session.tabUrl
+  });
+}
+
+/**
+ * Handle bind_audio requests to mark this tab as active for audio/control
+ */
+function handleBindAudio(session: Session, message: any): void {
+  const requestedTabId = (message.tabId as string | undefined) || session.tabId;
+
+  if (!requestedTabId) {
+    send(session.ws, { type: 'error', error: 'Missing tabId for bind_audio' });
+    return;
+  }
+
+  session.tabId = requestedTabId;
+  registerSession(session);
+  setActiveTab(session.userId, requestedTabId, session);
+
+  send(session.ws, {
+    type: 'bind_audio_ack',
+    tabId: requestedTabId,
+    isActive: session.isActiveTab
+  });
+}
+
+/**
  * Start recording
  */
 async function startRecording(session: Session, message: any): Promise<void> {
@@ -281,16 +368,34 @@ async function startRecording(session: Session, message: any): Promise<void> {
     return;
   }
 
+  if (!session.tabId) {
+    send(session.ws, { type: 'error', error: 'Tab not registered. Send hello first.' });
+    return;
+  }
+
   try {
-    // Generate ephemeral patient code
-    const patientCode = message.patientCode || generateEphemeralPatientCode();
+    // Merge patient hints
+    const patientHints = mergePatientHints(session, message.patientHints, message);
+    session.patientHints = patientHints;
+
+    // Generate patient identifiers based on hints
+    const patientCode = message.patientCode || patientHints.patientCode || generateEphemeralPatientCode();
+    const patientUuid = message.patientUuid ?? patientHints.patientUuid ?? null;
+
+    const latestTranscript = await getLatestTranscript(session.userId);
+
+    if (!patientHintsMatch(latestTranscript, patientHints)) {
+      send(session.ws, {
+        type: 'patient_hint_mismatch',
+        message: 'Incoming patient hints do not match the latest transcript. Starting a fresh run to avoid mixing patients.',
+        latestTranscriptId: latestTranscript?.id,
+        latestPatientCode: latestTranscript?.patient_code || null,
+        latestPatientUuid: latestTranscript?.patient_uuid || null
+      });
+    }
 
     // Create transcript run in Supabase
-    const transcriptId = await createTranscriptRun(
-      session.userId,
-      patientCode,
-      message.patientUuid || null
-    );
+    const transcriptId = await createTranscriptRun(session.userId, patientCode, patientUuid);
     session.transcriptId = transcriptId;
 
     // Initialize Deepgram
@@ -301,7 +406,8 @@ async function startRecording(session: Session, message: any): Promise<void> {
           event.text,
           event.isFinal,
           event.confidence,
-          event.speaker
+          event.speaker,
+          session.tabId
         );
       },
       onChunk: (chunk: TranscriptChunk) => {
@@ -310,11 +416,11 @@ async function startRecording(session: Session, message: any): Promise<void> {
       },
       onError: (error: Error) => {
         console.error('[Server] Deepgram error:', error);
-        wsBridge.updateFeedStatus('A', 'error');
+        wsBridge.updateFeedStatus('A', 'error', session.tabId);
         send(session.ws, { type: 'error', error: error.message });
       },
       onClose: () => {
-        wsBridge.updateFeedStatus('A', 'disconnected');
+        wsBridge.updateFeedStatus('A', 'disconnected', session.tabId);
       }
     });
 
@@ -322,7 +428,7 @@ async function startRecording(session: Session, message: any): Promise<void> {
     session.isRecording = true;
 
     // Update Feed A status
-    wsBridge.updateFeedStatus('A', 'connected');
+    wsBridge.updateFeedStatus('A', 'connected', session.tabId);
 
     // Start periodic save timer (every 5 seconds)
     session.saveTimer = setInterval(async () => {
@@ -332,7 +438,9 @@ async function startRecording(session: Session, message: any): Promise<void> {
     send(session.ws, {
       type: 'recording_started',
       transcriptId,
-      patientCode
+      patientCode,
+      patientUuid,
+      tabId: session.tabId
     });
 
     console.log(`[Server] Recording started: transcript ${transcriptId}, patient code ${patientCode}`);
@@ -375,7 +483,7 @@ async function stopRecording(session: Session): Promise<void> {
     }
 
     // Update Feed A status
-    wsBridge.updateFeedStatus('A', 'disconnected');
+    wsBridge.updateFeedStatus('A', 'disconnected', session.tabId);
 
     send(session.ws, {
       type: 'recording_stopped',
@@ -387,6 +495,129 @@ async function stopRecording(session: Session): Promise<void> {
     console.error('[Server] Failed to stop recording:', error);
     send(session.ws, { type: 'error', error: error.message });
   }
+}
+
+/**
+ * Merge patient hints from session, hello, and command payloads
+ */
+function mergePatientHints(session: Session, incoming?: PatientHints, message?: any): PatientHints {
+  const merged: PatientHints = { ...(session.patientHints || {}) };
+
+  if (incoming) {
+    Object.assign(merged, incoming);
+  }
+
+  if (message) {
+    if (message.patientCode) merged.patientCode = message.patientCode;
+    if (message.patientUuid) merged.patientUuid = message.patientUuid;
+    if (message.mrn) merged.mrn = message.mrn;
+  }
+
+  return merged;
+}
+
+/**
+ * Compare incoming patient hints with latest transcript to avoid mixing patients
+ */
+function patientHintsMatch(transcript: TranscriptRun | null, hints?: PatientHints): boolean {
+  if (!transcript || !hints) return true;
+
+  if (transcript.patient_uuid && hints.patientUuid && transcript.patient_uuid !== hints.patientUuid) {
+    return false;
+  }
+
+  if (transcript.patient_code && hints.patientCode && transcript.patient_code !== hints.patientCode) {
+    return false;
+  }
+
+  const transcriptMrn = (transcript.metadata as any)?.mrn;
+  if (transcriptMrn && hints.mrn && transcriptMrn !== hints.mrn) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Register session by user and tab
+ */
+function registerSession(session: Session): void {
+  if (!session.tabId) return;
+
+  let userMap = userSessions.get(session.userId);
+  if (!userMap) {
+    userMap = new Map<string, Session>();
+    userSessions.set(session.userId, userMap);
+  }
+
+  userMap.set(session.tabId, session);
+}
+
+/**
+ * Remove session from tracking maps
+ */
+function unregisterSession(session: Session): void {
+  if (!session.tabId) return;
+
+  const userMap = userSessions.get(session.userId);
+  if (userMap) {
+    userMap.delete(session.tabId);
+
+    if (userMap.size === 0) {
+      userSessions.delete(session.userId);
+    }
+  }
+
+  if (session.isActiveTab) {
+    const nextSession = userMap ? Array.from(userMap.values())[0] : undefined;
+
+    if (nextSession?.tabId) {
+      setActiveTab(session.userId, nextSession.tabId, nextSession);
+    } else {
+      activeTabs.delete(session.userId);
+    }
+  }
+}
+
+/**
+ * Ensure only active tabs can control audio/recording
+ */
+function ensureActiveTab(session: Session, action: string): boolean {
+  if (!session.tabId) {
+    send(session.ws, { type: 'error', error: `Tab not registered for ${action}` });
+    return false;
+  }
+
+  if (!session.isActiveTab) {
+    send(session.ws, {
+      type: 'error',
+      error: `Tab ${session.tabId} is inactive for ${action}. Call bind_audio to activate.`
+    });
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Flip active tab for a user and notify all clients
+ */
+function setActiveTab(userId: string, tabId: string, sourceSession?: Session): void {
+  const userMap = userSessions.get(userId);
+
+  if (!userMap || !userMap.has(tabId)) {
+    console.warn(`[Server] Attempted to activate unknown tab ${tabId} for user ${userId}`);
+    return;
+  }
+
+  for (const session of userMap.values()) {
+    session.isActiveTab = session.tabId === tabId;
+  }
+
+  activeTabs.set(userId, tabId);
+
+  const targetSession = userMap.get(tabId) || sourceSession;
+  wsBridge.broadcastActiveTabChange(userId, tabId, targetSession?.tabTitle, targetSession?.tabUrl);
 }
 
 /**

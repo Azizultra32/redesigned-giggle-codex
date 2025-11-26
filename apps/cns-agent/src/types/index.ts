@@ -52,6 +52,7 @@ export interface FeedInfo {
   label: string;
   status: FeedStatus;
   timestamp: string;
+  tabId?: string;
 }
 
 export interface StatusMessage {
@@ -63,6 +64,7 @@ export interface TranscriptMessage {
   type: 'transcript';
   data: {
     feed: FeedId;
+    tabId?: string;
     text: string;
     isFinal: boolean;
     confidence: number;
@@ -75,6 +77,7 @@ export interface AlertMessage {
   type: 'alert';
   data: {
     feed: FeedId;
+    tabId?: string;
     severity: 'critical' | 'warning' | 'info';
     message: string;
     keywords?: string[];
@@ -92,13 +95,30 @@ export interface CommandMessage {
   type: 'command';
   data: {
     feed: FeedId;
+    tabId?: string;
     command: 'trigger_map' | 'smart_fill' | 'undo_fill' | 'dictate';
     payload?: CommandPayload;
     timestamp: string;
   };
 }
 
-export type WsMessage = StatusMessage | TranscriptMessage | AlertMessage | CommandMessage;
+export interface ActiveTabChangedMessage {
+  type: 'active_tab_changed';
+  data: {
+    userId: string;
+    tabId: string;
+    tabTitle?: string;
+    tabUrl?: string;
+    timestamp: string;
+  };
+}
+
+export type WsMessage =
+  | StatusMessage
+  | TranscriptMessage
+  | AlertMessage
+  | CommandMessage
+  | ActiveTabChangedMessage;
 
 // ============================================================================
 // Supabase Schema (transcripts2 table)
@@ -162,4 +182,13 @@ export interface SessionConfig {
   userId: string;
   patientCode: string;
   patientUuid?: string | null;
+}
+
+export interface PatientHints {
+  patientCode?: string;
+  patientUuid?: string | null;
+  mrn?: string;
+  name?: string;
+  dob?: string;
+  [key: string]: any;
 }
