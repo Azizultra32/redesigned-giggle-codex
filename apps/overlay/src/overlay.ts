@@ -47,8 +47,9 @@ export class FerrariOverlay {
   private controlButtons: ControlButtons;
   private tabs: TabsComponent;
   private statusPills: StatusPills;
-  private utteranceBuffers: Map<string, { id: string; createdAt: number; timeout?: ReturnType<typeof setTimeout> }>; 
+  private utteranceBuffers: Map<string, { id: string; createdAt: number; timeout?: ReturnType<typeof setTimeout> }>;
   private bufferWindowMs = 32000; // Allow for ChunkAssembler window (~30s) before auto-finalizing
+  private readonly dropoutWarning = 'ASR connection dropped. Attempting to reconnect.';
 
   constructor(bridge: Bridge, domMapper: DOMMapper, tabId: string) {
     this.bridge = bridge;
@@ -97,7 +98,14 @@ export class FerrariOverlay {
 
     this.bridge.on('connection', (status: { connected: boolean; tabId?: string }) => {
       if (status.tabId && status.tabId !== this.tabId) return;
-      this.setState({ isConnected: status.connected });
+      const warnings = status.connected
+        ? this.state.warnings.filter(msg => msg !== this.dropoutWarning)
+        : Array.from(new Set([...this.state.warnings, this.dropoutWarning]));
+
+      this.setState({
+        isConnected: status.connected,
+        warnings
+      });
     });
 
     this.bridge.on('patient', (info: PatientInfo & { tabId?: string }) => {
@@ -201,10 +209,11 @@ export class FerrariOverlay {
 
   private handleTranscriptEvent(line: TranscriptLine): void {
     const timestamp = line.timestamp || Date.now();
-    const speakerKey = line.speaker || 'unknown';
+    const speakerKey = (line.speaker || 'unknown').toString().toLowerCase();
+    const isFinalMessage = Boolean(line.isFinal || line.status === 'final');
     const buffer = this.utteranceBuffers.get(speakerKey);
 
-    if (line.isFinal) {
+    if (isFinalMessage) {
       const activeBuffer = buffer && (timestamp - buffer.createdAt) <= this.bufferWindowMs ? buffer : null;
       if (activeBuffer?.timeout) {
         clearTimeout(activeBuffer.timeout);
@@ -215,7 +224,8 @@ export class FerrariOverlay {
         ...line,
         id: activeBuffer?.id || line.id || `${timestamp}`,
         timestamp,
-        status: 'final'
+        status: 'final',
+        isFinal: true
       });
       return;
     }
@@ -245,7 +255,8 @@ export class FerrariOverlay {
       ...line,
       id: targetBuffer.id,
       timestamp,
-      status: 'interim'
+      status: 'interim',
+      isFinal: false
     });
   }
 

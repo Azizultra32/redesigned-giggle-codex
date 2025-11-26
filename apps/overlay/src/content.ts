@@ -11,6 +11,7 @@ import { FerrariOverlay } from './overlay';
 import { Bridge } from './bridge';
 import { AudioCapture } from './audio-capture';
 import { DOMMapper, DetectedField } from './domMapper';
+import { FeedClient } from './feed-client';
 
 // Prevent multiple injections
 if ((window as any).__GHOST_NEXT_INJECTED__) {
@@ -32,6 +33,9 @@ async function initializeOverlay(): Promise<void> {
     // Initialize audio capture system
     const audioCapture = new AudioCapture(bridge, {}, tabId);
 
+    // Initialize listener for feed A websocket events
+    const feedClient = new FeedClient(bridge, tabId, { feedId: 'A' });
+
     // Initialize DOM mapper for field detection
     const domMapper = new DOMMapper(bridge);
 
@@ -44,6 +48,9 @@ async function initializeOverlay(): Promise<void> {
 
     // Connect to background service worker
     await bridge.connect();
+
+    // Begin listening for server-side feed events (diarization + interim/final)
+    feedClient.connect();
 
     await overlay.sendHello();
 

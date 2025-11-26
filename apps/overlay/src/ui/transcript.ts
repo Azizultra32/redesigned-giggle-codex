@@ -128,7 +128,8 @@ export class TranscriptView {
 
       const speakerBadge = document.createElement('span');
       speakerBadge.className = 'speaker-badge';
-      speakerBadge.dataset.speaker = line.speaker;
+      const normalizedSpeaker = line.speaker?.toLowerCase?.() || line.speaker || 'unknown';
+      speakerBadge.dataset.speaker = normalizedSpeaker;
       speakerBadge.textContent = this.getSpeakerLabel(line.speaker);
 
       const statusBadge = document.createElement('span');
@@ -162,14 +163,22 @@ export class TranscriptView {
   private getSpeakerLabel(speaker: string): string {
     // Map speaker IDs to friendly labels
     const speakerMap: Record<string, string> = {
-      '0': 'Provider',
+      '0': 'Doctor',
+      'doctor': 'Doctor',
+      'dr': 'Doctor',
+      'provider': 'Doctor',
+      'clinician': 'Doctor',
       '1': 'Patient',
-      'provider': 'Provider',
       'patient': 'Patient',
+      'pt': 'Patient',
+      'assistant': 'Assistant',
+      'scribe': 'Assistant',
+      'agent': 'Assistant',
       'unknown': 'Speaker'
     };
 
-    return speakerMap[speaker.toLowerCase()] || `Speaker ${speaker}`;
+    const normalized = speaker?.toLowerCase?.() || 'unknown';
+    return speakerMap[normalized] || `Speaker ${speaker}`;
   }
 
   private formatTime(timestamp: number): string {
@@ -265,15 +274,26 @@ export class TranscriptView {
       }
 
       .speaker-badge[data-speaker="0"],
-      .speaker-badge[data-speaker="provider"] {
+      .speaker-badge[data-speaker="doctor"],
+      .speaker-badge[data-speaker="dr"],
+      .speaker-badge[data-speaker="provider"],
+      .speaker-badge[data-speaker="clinician"] {
         background: rgba(76, 175, 80, 0.2);
         color: #4caf50;
       }
 
       .speaker-badge[data-speaker="1"],
-      .speaker-badge[data-speaker="patient"] {
+      .speaker-badge[data-speaker="patient"],
+      .speaker-badge[data-speaker="pt"] {
         background: rgba(33, 150, 243, 0.2);
         color: #2196f3;
+      }
+
+      .speaker-badge[data-speaker="assistant"],
+      .speaker-badge[data-speaker="scribe"],
+      .speaker-badge[data-speaker="agent"] {
+        background: rgba(156, 39, 176, 0.2);
+        color: #ce93d8;
       }
 
       .timestamp {
