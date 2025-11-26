@@ -27,10 +27,19 @@ export interface Session {
   deepgram: DeepgramConsumer | null;
   pendingChunks: TranscriptChunk[];
   isRecording: boolean;
+  activeTabId: string | null;
+  tabInfo?: TabMetadata;
 }
 
 export interface BrokerConfig {
   saveInterval: number; // ms between chunk saves
+}
+
+interface TabMetadata {
+  tabId: string;
+  url?: string;
+  title?: string;
+  patientHint?: string;
 }
 
 export class WebSocketBroker {
@@ -38,6 +47,7 @@ export class WebSocketBroker {
   private sessions: Map<WebSocket, Session> = new Map();
   private config: BrokerConfig;
   private saveTimers: Map<number, NodeJS.Timeout> = new Map();
+  private tabRegistry: Map<string, TabMetadata & { session: Session }> = new Map();
 
   constructor(wss: WebSocketServer, config?: Partial<BrokerConfig>) {
     this.wss = wss;
@@ -62,7 +72,8 @@ export class WebSocketBroker {
       transcriptId: null,
       deepgram: null,
       pendingChunks: [],
-      isRecording: false
+      isRecording: false,
+      activeTabId: null
     };
 
     this.sessions.set(ws, session);
@@ -100,6 +111,14 @@ export class WebSocketBroker {
     const { ws } = session;
 
     switch (message.type) {
+      case 'hello':
+        this.registerTab(session, message);
+        break;
+
+      case 'bind_audio':
+        await this.bindAudio(session, message);
+        break;
+
       case 'start_recording':
         await this.startRecording(session, message);
         break;
@@ -121,7 +140,54 @@ export class WebSocketBroker {
     }
   }
 
+  private registerTab(session: Session, message: any): void {
+    const tabId = message.tabId ?? message.tabID ?? message.tab_id;
+
+    if (!tabId) {
+      this.send(session.ws, { type: 'error', error: 'tabId is required for hello' });
+      return;
+    }
+
+    const tabKey = String(tabId);
+    const tabInfo: TabMetadata = {
+      tabId: tabKey,
+      url: message.url,
+      title: message.title,
+      patientHint: message.patientHint
+    };
+
+    session.tabInfo = tabInfo;
+    this.tabRegistry.set(tabKey, { ...tabInfo, session });
+
+    console.log(`[Broker] Registered tab ${tabKey} for user ${session.userId}`);
+    this.send(session.ws, { type: 'hello_ack', tabId: tabKey });
+  }
+
+  private async bindAudio(session: Session, message: any): Promise<void> {
+    const tabId = this.getTabIdFromMessage(message, session);
+
+    if (!tabId) {
+      this.send(session.ws, { type: 'error', error: 'tabId is required for bind_audio' });
+      return;
+    }
+
+    await this.startRecordingForTab(session, message, tabId);
+  }
+
+  private getTabIdFromMessage(message: any, session: Session): string | null {
+    const tabId = message.tabId ?? session.tabInfo?.tabId;
+    return tabId ? String(tabId) : null;
+  }
+
   private async startRecording(session: Session, message: any): Promise<void> {
+    await this.startRecordingForTab(session, message, this.getTabIdFromMessage(message, session));
+  }
+
+  private async startRecordingForTab(
+    session: Session,
+    message: any,
+    tabId: string | null
+  ): Promise<void> {
     const { ws, userId } = session;
 
     if (session.isRecording) {
@@ -130,7 +196,8 @@ export class WebSocketBroker {
     }
 
     try {
-      // Create transcript run
+      session.activeTabId = tabId;
+
       const transcriptId = await createTranscriptRun(
         userId,
         message.patientCode,
@@ -138,29 +205,32 @@ export class WebSocketBroker {
       );
       session.transcriptId = transcriptId;
 
-      // Initialize Deepgram
       session.deepgram = new DeepgramConsumer({
         onTranscript: (event) => this.handleTranscript(session, event),
         onChunk: (chunk) => this.handleChunk(session, chunk),
-        onError: (error) => this.send(ws, { type: 'error', error: error.message }),
-        onClose: () => this.send(ws, { type: 'deepgram_closed' })
+        onError: (error) =>
+          this.send(ws, { type: 'error', error: error.message, tabId: session.activeTabId || tabId }),
+        onClose: () => this.send(ws, { type: 'deepgram_closed', tabId: session.activeTabId || tabId })
       });
 
       await session.deepgram.connect();
       session.isRecording = true;
 
-      // Start periodic save timer
       this.startSaveTimer(session);
 
       this.send(ws, {
         type: 'recording_started',
-        transcriptId
+        transcriptId,
+        tabId: session.activeTabId || tabId || undefined
       });
 
-      console.log(`[Broker] Recording started: transcript ${transcriptId}`);
+      console.log(
+        `[Broker] Recording started${session.activeTabId ? ` for tab ${session.activeTabId}` : ''}: transcript ${transcriptId}`
+      );
     } catch (error: any) {
       console.error('[Broker] Failed to start recording:', error);
-      this.send(ws, { type: 'error', error: error.message });
+      this.send(ws, { type: 'error', error: error.message, tabId: session.activeTabId || tabId });
+      session.activeTabId = null;
     }
   }
 
@@ -196,7 +266,8 @@ export class WebSocketBroker {
 
       this.send(ws, {
         type: 'recording_stopped',
-        transcriptId
+        transcriptId,
+        tabId: session.activeTabId || undefined
       });
 
       console.log(`[Broker] Recording stopped: transcript ${transcriptId}`);
@@ -204,6 +275,8 @@ export class WebSocketBroker {
       console.error('[Broker] Failed to stop recording:', error);
       this.send(ws, { type: 'error', error: error.message });
     }
+
+    session.activeTabId = null;
   }
 
   private async setPatient(session: Session, message: any): Promise<void> {
@@ -230,7 +303,8 @@ export class WebSocketBroker {
       speaker: event.speaker,
       isFinal: event.isFinal,
       start: event.start,
-      end: event.end
+      end: event.end,
+      tabId: session.activeTabId || undefined
     });
   }
 
@@ -244,7 +318,8 @@ export class WebSocketBroker {
       speaker: chunk.speaker,
       text: chunk.text,
       wordCount: chunk.word_count,
-      duration: chunk.end - chunk.start
+      duration: chunk.end - chunk.start,
+      tabId: session.activeTabId || undefined
     });
   }
 
@@ -291,6 +366,9 @@ export class WebSocketBroker {
       if (session.transcriptId) {
         this.stopSaveTimer(session.transcriptId);
         this.savePendingChunks(session);
+      }
+      if (session.tabInfo?.tabId) {
+        this.tabRegistry.delete(session.tabInfo.tabId);
       }
       this.sessions.delete(ws);
     }

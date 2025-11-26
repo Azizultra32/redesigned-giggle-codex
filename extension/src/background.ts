@@ -18,6 +18,8 @@ chrome.runtime.onConnect.addListener((port) => {
   console.log(`[Background] Content script connected from tab ${tabId}`);
   connectedPorts.set(tabId, port);
 
+  port.postMessage({ type: 'tab-info', data: { tabId } });
+
   port.onMessage.addListener((message) => {
     handleContentMessage(tabId, message);
   });

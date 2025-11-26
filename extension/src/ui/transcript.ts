@@ -11,6 +11,7 @@ export interface TranscriptLine {
   text: string;
   timestamp: number;
   isFinal: boolean;
+  tabId?: string | number;
 }
 
 export class TranscriptView {
