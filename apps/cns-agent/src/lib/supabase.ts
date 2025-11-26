@@ -13,7 +13,7 @@ let offlineMode = false;
 
 interface MockQuery {
   select: (columns?: string) => Promise<{ data: any; error: any }>;
-  insert: (data: any) => Promise<{ data: any; error: any }>;
+  insert: (data: any) => MockQuery;
   update: (data: any) => Promise<{ data: any; error: any }>;
   single: () => Promise<{ data: any; error: any }>;
   eq: (column: string, value: any) => MockQuery;
@@ -25,6 +25,7 @@ interface MockTableState {
   filters: { column: string; value: any }[];
   orderBy?: { column: string; ascending: boolean };
   limitCount?: number;
+  stagedRows?: TranscriptRun[];
 }
 
 function createMockQuery(mockData: Map<number, TranscriptRun>, state: MockTableState): MockQuery {
@@ -45,7 +46,7 @@ function createMockQuery(mockData: Map<number, TranscriptRun>, state: MockTableS
       return createMockQuery(mockData, { ...state, limitCount: count });
     },
     async select(_columns?: string) {
-      let rows = Array.from(mockData.values());
+      let rows = state.stagedRows ? [...state.stagedRows] : Array.from(mockData.values());
 
       // Apply filters
       for (const filter of state.filters) {
@@ -70,12 +71,17 @@ function createMockQuery(mockData: Map<number, TranscriptRun>, state: MockTableS
 
       return { data: rows, error: null };
     },
-    async insert(data: any) {
+    insert(data: any) {
       const id = mockData.size + 1;
       const record = { ...data, id, created_at: new Date().toISOString() } as TranscriptRun;
       mockData.set(id, record);
       console.log(`[Supabase Mock] Inserted record with id ${id}`);
-      return { data: { id }, error: null };
+
+      // Return a chainable query builder seeded with the inserted row(s)
+      return createMockQuery(mockData, {
+        ...state,
+        stagedRows: [record]
+      });
     },
     async update(updates: any) {
       let updatedCount = 0;
