@@ -46,11 +46,11 @@ All open PRs have **merge conflicts** with main (`mergeable_state: "dirty"`) and
 
 | Priority | Issue | Location | Description | Recommended Fix |
 |----------|-------|----------|-------------|-----------------|
-| **P1** | Transcript Routing Bug | `overlay.ts:212-214` | Transcript updates with no `tabId` route to 'summary' instead of 'transcript' | Change fallback default from `boundTab/activeTab` to `'transcript'` |
-| **Critical** | XSS Vulnerability | `overlay.ts:433-440` | `task.label` rendered via innerHTML without sanitization | Use `textContent` instead of `innerHTML` |
-| **Critical** | XSS Vulnerability | `overlay.ts:523-530` | `note.content` rendered via innerHTML without sanitization | Use `textContent` instead of `innerHTML` |
-| **Critical** | XSS Vulnerability | `overlay.ts:456-459` | Patient info (name, mrn, dob) rendered via innerHTML | Use `textContent` instead of `innerHTML` |
-| **Critical** | XSS Vulnerability | `overlay.ts:477-483` | `entry.message` in debug panel rendered via innerHTML | Use `textContent` instead of `innerHTML` |
+| **P1** | Transcript Routing Bug | `overlay.ts:212-214` | Transcript updates with no `tabId` route to 'summary' instead of 'transcript' due to fallback logic using `boundTab/activeTab` first | In `addTranscriptLine`, change `line.tabId \|\| this.state.boundTab \|\| this.state.activeTab \|\| 'transcript'` to `line.tabId \|\| 'transcript'` to ensure transcript content goes to the transcript tab by default |
+| **Critical** | XSS Vulnerability | `overlay.ts:433-440` | `task.label` rendered via innerHTML without sanitization | Use `textContent` for plain text, or use DOMPurify for HTML content |
+| **Critical** | XSS Vulnerability | `overlay.ts:523-530` | `note.content` rendered via innerHTML without sanitization | Use `textContent` for plain text, or use DOMPurify for HTML content |
+| **Critical** | XSS Vulnerability | `overlay.ts:456-459` | Patient info (name, mrn, dob) rendered via innerHTML | Use `textContent` for plain text, or use DOMPurify for HTML content |
+| **Critical** | XSS Vulnerability | `overlay.ts:477-483` | `entry.message` in debug panel rendered via innerHTML | Use `textContent` for plain text, or use DOMPurify for HTML content |
 | Medium | Runtime Safety | `overlay.ts:261` | `transcriptByTab[activeTab]` could be undefined | Add `|| []` fallback |
 | Medium | Accessibility | `tabs.ts:152` | Binding indicator uses aria-hidden without screen reader support | Add ARIA labels for binding state |
 | Low | Event Naming | `bridge.ts:22-27` | Inconsistent event naming (kebab-case vs snake_case) | Standardize on kebab-case |
@@ -98,7 +98,7 @@ All open PRs have **merge conflicts** with main (`mergeable_state: "dirty"`) and
 | **Critical** | XSS Vulnerability | `debug-log.ts:61-68` | `entry.message` and `entry.detail` rendered via innerHTML | Use `textContent` instead |
 | **Critical** | XSS Vulnerability | `feed-badges.ts:64-67` | `status.label` rendered via innerHTML | Use `textContent` instead |
 | Medium | ID Collision | `overlay.ts:224` | Alert ID generation could create duplicates | Add random suffix for uniqueness |
-| Medium | Autopilot Logic | `server.ts:205` | Ready when `surfaceCount > 0 || isRecording` may be incorrect | Should be `surfaceCount > 0 && isRecording` |
+| Medium | Autopilot Logic | `server.ts:205` | Ready when `surfaceCount > 0 \|\| isRecording` may incorrectly mark autopilot as ready during recording even without patient context | Review business requirements: if autopilot should only be ready when BOTH patient context exists AND recording is active, change to `surfaceCount > 0 && isRecording`; document the intended behavior |
 | Low | Tabs Comment | `tabs.ts:7` | Comment lists only 3 tabs but code has 4 | Update comment to include Debug |
 | Low | Timestamp Override | `ws-bridge.ts:98` | Hydration overrides stored timestamp | Use original timestamp |
 
@@ -160,8 +160,9 @@ All open PRs have **merge conflicts** with main (`mergeable_state: "dirty"`) and
 
 ### Critical Security Fixes (Apply First)
 All XSS vulnerabilities must be fixed before merging any PR:
-1. Replace all `innerHTML` with `textContent` for dynamic content
-2. Or implement HTML escaping utility function
+1. For plain text content: Replace `innerHTML` with `textContent`
+2. For HTML content: Implement DOMPurify or similar sanitization library
+3. Create a shared utility function for consistent sanitization across components
 
 ### Merge Order Recommendation
 1. **PR #3** - Multi-tab support (foundation for other features)
