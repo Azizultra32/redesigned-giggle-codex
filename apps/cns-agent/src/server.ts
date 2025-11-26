@@ -215,6 +215,16 @@ wss.on('connection', (ws: WebSocket, req) => {
   // Add to WsBridge for Feed status broadcasting
   wsBridge.addClient(ws);
 
+  const safelyCleanupSession = async (reason: string) => {
+    try {
+      await cleanupSession(session);
+    } catch (error) {
+      console.error(`[Server] Error during cleanup after ${reason}:`, error);
+    } finally {
+      sessions.delete(ws);
+    }
+  };
+
   // Handle messages
   ws.on('message', async (data) => {
     await handleMessage(session, data);
@@ -223,14 +233,13 @@ wss.on('connection', (ws: WebSocket, req) => {
   // Handle close
   ws.on('close', () => {
     console.log(`[Server] WebSocket disconnected: ${userId}`);
-    cleanupSession(session);
-    sessions.delete(ws);
+    void safelyCleanupSession('close');
   });
 
   // Handle error
   ws.on('error', (error) => {
     console.error('[Server] WebSocket error:', error);
-    cleanupSession(session);
+    void safelyCleanupSession('error');
   });
 
   // Send welcome message
@@ -428,7 +437,7 @@ async function startRecording(session: Session, message: any): Promise<void> {
 
     // Start periodic save timer (every 5 seconds)
     session.saveTimer = setInterval(async () => {
-      await savePendingChunks(session);
+      await savePendingChunks(session, 'interval');
     }, 5000);
 
     send(session.ws, {
@@ -476,7 +485,7 @@ async function stopRecording(session: Session): Promise<void> {
     }
 
     // Final save of pending chunks
-    await savePendingChunks(session);
+    await savePendingChunks(session, 'stop_recording');
 
     // Mark transcript complete
     if (session.transcriptId) {
@@ -567,7 +576,7 @@ function isActiveSession(session: Session): boolean {
 /**
  * Save pending chunks to Supabase
  */
-async function savePendingChunks(session: Session): Promise<void> {
+async function savePendingChunks(session: Session, context: string = 'save'): Promise<void> {
   if (!session.transcriptId || session.pendingChunks.length === 0) return;
 
   const chunks = [...session.pendingChunks];
@@ -575,6 +584,9 @@ async function savePendingChunks(session: Session): Promise<void> {
 
   try {
     await saveTranscriptChunks(session.transcriptId, chunks);
+    console.log(
+      `[Server] Saved ${chunks.length} pending chunks for transcript ${session.transcriptId} (${context})`
+    );
   } catch (error) {
     // Re-queue chunks on failure
     session.pendingChunks.unshift(...chunks);
@@ -585,15 +597,22 @@ async function savePendingChunks(session: Session): Promise<void> {
 /**
  * Cleanup session
  */
-function cleanupSession(session: Session): void {
-  if (session.deepgram) {
-    session.deepgram.disconnect();
-  }
+async function cleanupSession(session: Session): Promise<void> {
   if (session.saveTimer) {
     clearInterval(session.saveTimer);
   }
+
   if (session.transcriptId) {
-    savePendingChunks(session);
+    await savePendingChunks(session, 'cleanup');
+  }
+
+  if (session.deepgram) {
+    try {
+      session.deepgram.disconnect();
+    } catch (error) {
+      console.error('[Server] Error disconnecting Deepgram:', error);
+    }
+    session.deepgram = null;
   }
 
   removeSession(session);
