@@ -82,7 +82,7 @@ export class WsBridge {
   /**
    * Update feed status and broadcast to all clients
    */
-  updateFeedStatus(feedId: FeedId, status: FeedStatus): void {
+  updateFeedStatus(feedId: FeedId, status: FeedStatus, tabId?: string): void {
     const state = this.feedStates.get(feedId);
     if (!state) {
       console.warn(`[WsBridge] Unknown feed: ${feedId}`);
@@ -98,7 +98,8 @@ export class WsBridge {
         feed: state.feed,
         label: state.label,
         status: state.status,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        tabId
       }
     };
 
@@ -109,7 +110,13 @@ export class WsBridge {
   /**
    * Broadcast a transcript event (Feed A)
    */
-  broadcastTranscript(text: string, isFinal: boolean, confidence: number, speaker: number): void {
+  broadcastTranscript(
+    text: string,
+    isFinal: boolean,
+    confidence: number,
+    speaker: number,
+    tabId?: string
+  ): void {
     const message: TranscriptMessage = {
       type: 'transcript',
       data: {
@@ -118,6 +125,7 @@ export class WsBridge {
         isFinal,
         confidence,
         speaker,
+        tabId,
         timestamp: new Date().toISOString()
       }
     };
