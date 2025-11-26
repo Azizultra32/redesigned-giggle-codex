@@ -7,19 +7,45 @@
 
 // Track connected content scripts
 const connectedPorts: Map<number, chrome.runtime.Port> = new Map();
-const tabMetadata: Map<number, { overlayTabId?: string; url?: string; patientHint?: unknown }> = new Map();
-const mcpPendingRequests: Map<string, (result: McpFillResult) => void> = new Map();
+interface PatientContext {
+  name?: string;
+  mrn?: string;
+  dob?: string;
+}
+
+interface SmartFillStep {
+  action: 'switch-tab' | 'click' | 'type' | 'focus-field' | 'wait';
+  selector?: string;
+  value?: string;
+  description?: string;
+  tabId?: number;
+  targetUrl?: string;
+  durationMs?: number;
+  fieldId?: string;
+}
+
+interface SmartFillPlan {
+  steps: SmartFillStep[];
+  tabId?: number;
+  targetUrl?: string;
+  patient?: PatientContext;
+}
+
+const tabMetadata: Map<number, { overlayTabId?: string; url?: string; patientHint?: PatientContext }> = new Map();
+const mcpPendingRequests: Map<string, (result: McpResponse) => void> = new Map();
 
 const MCP_AUTOMATION_FLAG = 'mcpAutomationEnabled';
 const MCP_TIMEOUT_MS = 5000;
 
-type McpCommand = 'mcp:switch-tab' | 'mcp:fill-sample';
+type McpCommand = 'mcp:switch-tab' | 'mcp:fill-sample' | 'mcp:execute-smart-fill-plan';
 
 interface McpRequest {
   type: McpCommand;
   targetUrl?: string;
   tabId?: number;
   value?: string;
+  plan?: SmartFillPlan;
+  patient?: PatientContext;
 }
 
 interface McpFillResult {
@@ -29,6 +55,16 @@ interface McpFillResult {
   tabId?: string;
   targetField?: string;
 }
+
+interface McpPlanResult {
+  success: boolean;
+  message: string;
+  requestId?: string;
+  tabId?: string;
+  completedSteps?: number;
+}
+
+type McpResponse = McpFillResult | McpPlanResult;
 
 // Listen for connections from content scripts
 chrome.runtime.onConnect.addListener((port) => {
@@ -76,7 +112,8 @@ function handleContentMessage(tabId: number, message: { type: string; data?: unk
       break;
 
     case 'mcp-fill-result':
-      resolveMcpRequest(message.data as McpFillResult | undefined);
+    case 'mcp-plan-result':
+      resolveMcpRequest(message.data as McpResponse | undefined);
       break;
 
     case 'connection':
@@ -226,6 +263,9 @@ async function handleMcpRequest(message?: McpRequest): Promise<Record<string, un
     case 'mcp:fill-sample':
       return triggerSampleFill(message);
 
+    case 'mcp:execute-smart-fill-plan':
+      return executeSmartFillPlan(message);
+
     default:
       return { success: false, error: `Unsupported MCP command: ${message.type}` };
   }
@@ -270,6 +310,34 @@ async function triggerSampleFill(message: McpRequest): Promise<Record<string, un
   };
 }
 
+async function executeSmartFillPlan(message: McpRequest): Promise<Record<string, unknown>> {
+  const plan = message.plan;
+  if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) {
+    return { success: false, error: 'Smart Fill plan is missing or empty.' };
+  }
+
+  const targetTabId = await resolveTargetTabId(plan.tabId ?? message.tabId, plan.targetUrl ?? message.targetUrl);
+  if (!targetTabId) {
+    return { success: false, error: 'Unable to resolve target tab for Smart Fill plan.' };
+  }
+
+  const safety = enforcePatientSafety(targetTabId, plan.patient ?? message.patient, plan.steps);
+  if (!safety.safe) {
+    return { success: false, error: safety.reason };
+  }
+
+  await activateTab(targetTabId);
+  sendActiveState(targetTabId);
+
+  const runResult = await runSmartFillSteps(targetTabId, plan.steps, plan.patient ?? message.patient);
+
+  return {
+    ...runResult,
+    command: message.type,
+    tabId: targetTabId
+  };
+}
+
 async function getActiveTabId(): Promise<number | undefined> {
   const tabs = await queryTabs({ active: true, currentWindow: true });
   return tabs[0]?.id;
@@ -311,6 +379,164 @@ function activateTab(tabId: number): Promise<chrome.tabs.Tab | undefined> {
   });
 }
 
+async function resolveTargetTabId(tabId?: number, targetUrl?: string): Promise<number | undefined> {
+  const explicitTab = typeof tabId === 'number' ? await getTabById(tabId) : undefined;
+  if (explicitTab?.id) return explicitTab.id;
+
+  const hintedTab = await findTabByUrlHint(targetUrl);
+  return hintedTab?.id;
+}
+
+function enforcePatientSafety(
+  tabId: number,
+  patient: PatientContext | undefined,
+  steps: SmartFillStep[]
+): { safe: boolean; reason?: string } {
+  const requiresWrite = steps.some(step => step.action === 'type');
+  if (!requiresWrite) return { safe: true };
+
+  const metadata = tabMetadata.get(tabId);
+  const tabPatient = metadata?.patientHint;
+  const hasPlanPatient = Boolean(patient?.mrn || patient?.name);
+
+  if (hasPlanPatient && tabPatient && isPatientMismatch(tabPatient, patient!)) {
+    return {
+      safe: false,
+      reason: 'Patient mismatch between Smart Fill plan and target tab. Aborting write to prevent cross-charting.'
+    };
+  }
+
+  if (!hasPlanPatient) {
+    const uniquePatients = getUniquePatientKeys();
+    if (uniquePatients.size > 1) {
+      return {
+        safe: false,
+        reason: 'Ambiguous patient context across tabs. Provide patient details before executing Smart Fill writes.'
+      };
+    }
+  }
+
+  return { safe: true };
+}
+
+function getUniquePatientKeys(): Set<string> {
+  const keys = new Set<string>();
+  tabMetadata.forEach(meta => {
+    if (meta.patientHint?.mrn) {
+      keys.add(meta.patientHint.mrn.toLowerCase());
+    } else if (meta.patientHint?.name) {
+      keys.add(meta.patientHint.name.toLowerCase());
+    }
+  });
+  return keys;
+}
+
+function isPatientMismatch(patientA: PatientContext, patientB: PatientContext): boolean {
+  if (patientA.mrn && patientB.mrn) {
+    return patientA.mrn.toLowerCase() !== patientB.mrn.toLowerCase();
+  }
+
+  if (patientA.name && patientB.name) {
+    return patientA.name.toLowerCase() !== patientB.name.toLowerCase();
+  }
+
+  return false;
+}
+
+async function runSmartFillSteps(
+  initialTabId: number,
+  steps: SmartFillStep[],
+  patient: PatientContext | undefined
+): Promise<McpPlanResult> {
+  let currentTabId = initialTabId;
+  let completedSteps = 0;
+
+  for (const step of steps) {
+    switch (step.action) {
+      case 'switch-tab': {
+        const nextTabId = await resolveTargetTabId(step.tabId, step.targetUrl);
+        if (!nextTabId) {
+          return {
+            success: false,
+            message: step.description || 'Unable to find tab for switch-tab step.',
+            completedSteps
+          };
+        }
+
+        await activateTab(nextTabId);
+        sendActiveState(nextTabId);
+        currentTabId = nextTabId;
+
+        const safety = enforcePatientSafety(currentTabId, patient, steps.slice(completedSteps + 1));
+        if (!safety.safe) {
+          return { success: false, message: safety.reason || 'Patient safety check failed.', completedSteps };
+        }
+
+        completedSteps += 1;
+        break;
+      }
+
+      case 'wait': {
+        const durationMs = step.durationMs ?? 500;
+        await new Promise(resolve => setTimeout(resolve, durationMs));
+        completedSteps += 1;
+        break;
+      }
+
+      case 'click':
+      case 'type':
+      case 'focus-field': {
+        const safety = enforcePatientSafety(currentTabId, patient, [step]);
+        if (!safety.safe) {
+          return { success: false, message: safety.reason || 'Patient safety check failed.', completedSteps };
+        }
+
+        const result = await sendPlanStep(currentTabId, step, patient);
+        if (!result.success) {
+          return { ...result, completedSteps };
+        }
+        completedSteps += 1;
+        break;
+      }
+
+      default:
+        return { success: false, message: `Unsupported Smart Fill step: ${step.action}`, completedSteps };
+    }
+  }
+
+  return {
+    success: true,
+    message: 'Smart Fill plan completed successfully.',
+    completedSteps
+  };
+}
+
+async function sendPlanStep(
+  tabId: number,
+  step: SmartFillStep,
+  patient: PatientContext | undefined
+): Promise<McpPlanResult> {
+  const port = connectedPorts.get(tabId);
+
+  if (!port) {
+    return {
+      success: false,
+      message: 'Content script not connected for target tab.'
+    };
+  }
+
+  const requestId = generateMcpRequestId();
+  const overlayTabId = tabMetadata.get(tabId)?.overlayTabId;
+  const pendingResult = waitForMcpResponse<McpPlanResult>(requestId);
+
+  port.postMessage({
+    type: 'mcp-plan-step',
+    data: { step, patient, requestId, tabId: overlayTabId }
+  });
+
+  return pendingResult;
+}
+
 async function sendMcpFillCommand(tabId: number, value?: string): Promise<McpFillResult> {
   const port = connectedPorts.get(tabId);
 
@@ -323,7 +549,7 @@ async function sendMcpFillCommand(tabId: number, value?: string): Promise<McpFil
 
   const requestId = generateMcpRequestId();
   const overlayTabId = tabMetadata.get(tabId)?.overlayTabId;
-  const pendingResult = waitForMcpResponse(requestId);
+  const pendingResult = waitForMcpResponse<McpFillResult>(requestId);
 
   port.postMessage({
     type: 'mcp-fill-sample',
@@ -333,22 +559,22 @@ async function sendMcpFillCommand(tabId: number, value?: string): Promise<McpFil
   return pendingResult;
 }
 
-function waitForMcpResponse(requestId: string): Promise<McpFillResult> {
+function waitForMcpResponse<T extends McpResponse>(requestId: string): Promise<T> {
   return new Promise(resolve => {
     const timeout = setTimeout(() => {
       mcpPendingRequests.delete(requestId);
-      resolve({ success: false, message: 'Timed out waiting for MCP fill result.', requestId });
+      resolve({ success: false, message: 'Timed out waiting for MCP response.', requestId } as T);
     }, MCP_TIMEOUT_MS);
 
     mcpPendingRequests.set(requestId, (result) => {
       clearTimeout(timeout);
       mcpPendingRequests.delete(requestId);
-      resolve(result);
+      resolve(result as T);
     });
   });
 }
 
-function resolveMcpRequest(result?: McpFillResult): void {
+function resolveMcpRequest(result?: McpResponse): void {
   if (!result?.requestId) return;
 
   const resolver = mcpPendingRequests.get(result.requestId);
