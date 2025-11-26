@@ -9,6 +9,101 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { TranscriptChunk, TranscriptRun, DomMap } from '../types/index.js';
 
 let supabase: SupabaseClient | null = null;
+let offlineMode = false;
+
+interface MockQuery {
+  select: (columns?: string) => Promise<{ data: any; error: any }>;
+  insert: (data: any) => Promise<{ data: any; error: any }>;
+  update: (data: any) => Promise<{ data: any; error: any }>;
+  single: () => Promise<{ data: any; error: any }>;
+  eq: (column: string, value: any) => MockQuery;
+  order: (column: string, options?: any) => MockQuery;
+  limit: (count: number) => MockQuery;
+}
+
+interface MockTableState {
+  filters: { column: string; value: any }[];
+  orderBy?: { column: string; ascending: boolean };
+  limitCount?: number;
+}
+
+function createMockQuery(mockData: Map<number, TranscriptRun>, state: MockTableState): MockQuery {
+  return {
+    eq(column: string, value: any) {
+      return createMockQuery(mockData, {
+        ...state,
+        filters: [...state.filters, { column, value }]
+      });
+    },
+    order(column: string, options?: any) {
+      return createMockQuery(mockData, {
+        ...state,
+        orderBy: { column, ascending: options?.ascending !== false }
+      });
+    },
+    limit(count: number) {
+      return createMockQuery(mockData, { ...state, limitCount: count });
+    },
+    async select(_columns?: string) {
+      let rows = Array.from(mockData.values());
+
+      // Apply filters
+      for (const filter of state.filters) {
+        rows = rows.filter((row) => (row as any)[filter.column] === filter.value);
+      }
+
+      // Apply ordering
+      if (state.orderBy) {
+        const { column, ascending } = state.orderBy;
+        rows = rows.sort((a: any, b: any) => {
+          const aVal = (a as any)[column];
+          const bVal = (b as any)[column];
+          if (aVal === bVal) return 0;
+          return ascending ? (aVal > bVal ? 1 : -1) : (aVal < bVal ? 1 : -1);
+        });
+      }
+
+      // Apply limit
+      if (state.limitCount !== undefined) {
+        rows = rows.slice(0, state.limitCount);
+      }
+
+      return { data: rows, error: null };
+    },
+    async insert(data: any) {
+      const id = mockData.size + 1;
+      const record = { ...data, id, created_at: new Date().toISOString() } as TranscriptRun;
+      mockData.set(id, record);
+      console.log(`[Supabase Mock] Inserted record with id ${id}`);
+      return { data: { id }, error: null };
+    },
+    async update(updates: any) {
+      let updatedCount = 0;
+
+      for (const [id, record] of mockData.entries()) {
+        const matches = state.filters.every((filter) => (record as any)[filter.column] === filter.value);
+        if (matches) {
+          const updatedRecord = { ...record, ...updates } as TranscriptRun;
+          mockData.set(id, updatedRecord);
+          updatedCount++;
+        }
+      }
+
+      console.log(`[Supabase Mock] Update applied to ${updatedCount} record(s)`);
+      return { data: null, error: null };
+    },
+    async single() {
+      const { data } = await this.select();
+      const row = (Array.isArray(data) ? data[0] : null) || null;
+
+      if (!row) {
+        return { data: null, error: { code: 'PGRST116', message: 'Not found' } };
+      }
+
+      return { data: row, error: null };
+    }
+  };
+}
 
 /**
  * Get or create Supabase client
@@ -22,42 +117,19 @@ function getClient(): SupabaseClient {
   if (!url || !key) {
     console.warn('[Supabase] Missing credentials (SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY), running in offline mode');
     console.warn('[Supabase] Mock client active - no data will be persisted');
-    
+
+    offlineMode = true;
+
     // Return a more realistic mock client for offline development
     const mockData = new Map<number, TranscriptRun>();
-    let nextId = 1;
-    
+
     return {
       from: (table: string) => {
         if (table !== 'transcripts2') {
           console.warn(`[Supabase Mock] Table '${table}' not supported in mock mode`);
         }
-        
-        return {
-          insert: async (data: any) => {
-            const id = nextId++;
-            const record = { ...data, id, created_at: new Date().toISOString() };
-            mockData.set(id, record);
-            console.log(`[Supabase Mock] Inserted record with id ${id}`);
-            return { data: { id }, error: null };
-          },
-          select: async (columns?: string) => {
-            const data = Array.from(mockData.values());
-            console.log(`[Supabase Mock] Selected ${data.length} records`);
-            return { data, error: null };
-          },
-          update: async (updates: any) => {
-            console.log(`[Supabase Mock] Update called (not applied in mock)`);
-            return { data: null, error: null };
-          },
-          single: async () => {
-            const data = Array.from(mockData.values()).pop() || null;
-            return { data, error: data ? null : { code: 'PGRST116', message: 'Not found' } };
-          },
-          eq: function(column: string, value: any) { return this; },
-          order: function(column: string, options?: any) { return this; },
-          limit: function(count: number) { return this; }
-        };
+
+        return createMockQuery(mockData, { filters: [] });
       }
     } as unknown as SupabaseClient;
   }
@@ -65,6 +137,20 @@ function getClient(): SupabaseClient {
   supabase = createClient(url, key);
   console.log('[Supabase] Client initialized with service role key');
   return supabase;
+}
+
+/**
+ * Whether the SDK is running with a real Supabase backend.
+ */
+export function isSupabaseOffline(): boolean {
+  if (offlineMode) return true;
+
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    offlineMode = true;
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -250,6 +336,31 @@ export async function getLatestTranscript(userId: string): Promise<TranscriptRun
   }
 
   return data as TranscriptRun;
+}
+
+/**
+ * Get transcripts with optional patient code filter
+ */
+export async function getTranscriptsByPatientCode(patientCode?: string): Promise<TranscriptRun[]> {
+  const client = getClient();
+
+  let query = client
+    .from('transcripts2')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (patientCode) {
+    query = query.eq('patient_code', patientCode);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    console.error('[Supabase] Failed to list transcripts:', error);
+    throw new Error(`Failed to list transcripts: ${error.message}`);
+  }
+
+  return (data || []) as TranscriptRun[];
 }
 
 /**

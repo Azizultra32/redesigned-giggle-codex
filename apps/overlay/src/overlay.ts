@@ -104,6 +104,15 @@ export class FerrariOverlay {
       this.setState({ isActive: data.isActive });
     });
 
+    this.bridge.on('server-error', (data: { error?: string; tabId?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      if (!data.error) return;
+
+      this.setState({
+        warnings: Array.from(new Set([...this.state.warnings, data.error]))
+      });
+    });
+
     this.bridge.on('patient-mismatch', (data: { tabId?: string; message?: string }) => {
       if (data.tabId && data.tabId !== this.tabId) return;
       const warning = data.message || 'Patient mismatch detected. Verify patient before recording.';

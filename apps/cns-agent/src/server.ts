@@ -23,9 +23,11 @@ import {
   updatePatientInfo,
   getTranscript,
   getLatestTranscript,
-  generateEphemeralPatientCode
+  generateEphemeralPatientCode,
+  getTranscriptsByPatientCode,
+  isSupabaseOffline
 } from './lib/supabase.js';
-import { TranscriptChunk, TranscriptEvent, DomMap } from './types/index.js';
+import { TranscriptChunk, TranscriptEvent, DomMap, TranscriptRun } from './types/index.js';
 
 // Load environment variables
 config();
@@ -131,6 +133,21 @@ app.get('/patient/current', async (req: Request, res: Response) => {
 });
 
 /**
+ * List transcripts, optionally filtered by patient_code
+ */
+app.get('/transcripts', async (req: Request, res: Response) => {
+  try {
+    const patientCode = req.query.patient_code as string | undefined;
+    const transcripts = await getTranscriptsByPatientCode(patientCode);
+
+    res.json(transcripts.map(formatTranscriptResponse));
+  } catch (error: any) {
+    console.error('[Server] /transcripts error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * Get specific transcript by ID
  */
 app.get('/transcripts/:id', async (req: Request, res: Response) => {
@@ -149,7 +166,7 @@ app.get('/transcripts/:id', async (req: Request, res: Response) => {
       return;
     }
 
-    res.json(transcript);
+    res.json(formatTranscriptResponse(transcript));
   } catch (error: any) {
     console.error('[Server] /transcripts/:id error:', error);
     res.status(500).json({ error: error.message });
@@ -186,6 +203,7 @@ interface Session {
   pendingChunks: TranscriptChunk[];
   isRecording: boolean;
   saveTimer: NodeJS.Timeout | null;
+  saveInProgress: boolean;
 }
 
 const sessions = new Map<WebSocket, Session>();
@@ -207,7 +225,8 @@ wss.on('connection', (ws: WebSocket, req) => {
     deepgram: null,
     pendingChunks: [],
     isRecording: false,
-    saveTimer: null
+    saveTimer: null,
+    saveInProgress: false
   };
 
   sessions.set(ws, session);
@@ -235,6 +254,14 @@ wss.on('connection', (ws: WebSocket, req) => {
 
   // Send welcome message
   send(ws, { type: 'connected', userId });
+
+  if (isSupabaseOffline()) {
+    send(ws, {
+      type: 'error',
+      error: 'Supabase credentials missing; running in offline mock mode. Transcript data will not persist.',
+      severity: 'warning'
+    });
+  }
 });
 
 /**
@@ -408,6 +435,9 @@ async function startRecording(session: Session, message: any): Promise<void> {
 
         // Queue chunk for batch save
         session.pendingChunks.push(chunk);
+
+        // Persist as we go to keep transcript_chunk and transcript text fresh
+        void savePendingChunks(session);
       },
       onError: (error: Error) => {
         console.error('[Server] Deepgram error:', error);
@@ -436,6 +466,7 @@ async function startRecording(session: Session, message: any): Promise<void> {
       transcriptId,
       patientCode,
       tabId: session.tabId,
+      userId: session.userId,
       patientHint
     });
 
@@ -568,10 +599,11 @@ function isActiveSession(session: Session): boolean {
  * Save pending chunks to Supabase
  */
 async function savePendingChunks(session: Session): Promise<void> {
-  if (!session.transcriptId || session.pendingChunks.length === 0) return;
+  if (!session.transcriptId || session.pendingChunks.length === 0 || session.saveInProgress) return;
 
   const chunks = [...session.pendingChunks];
   session.pendingChunks = [];
+  session.saveInProgress = true;
 
   try {
     await saveTranscriptChunks(session.transcriptId, chunks);
@@ -579,6 +611,13 @@ async function savePendingChunks(session: Session): Promise<void> {
     // Re-queue chunks on failure
     session.pendingChunks.unshift(...chunks);
     console.error('[Server] Failed to save chunks, will retry:', error);
+  } finally {
+    session.saveInProgress = false;
+
+    // If new chunks arrived while saving, persist them too
+    if (session.pendingChunks.length > 0) {
+      await savePendingChunks(session);
+    }
   }
 }
 
@@ -606,6 +645,24 @@ function send(ws: WebSocket, message: object): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
   }
+}
+
+function formatTranscriptResponse(transcript: TranscriptRun): object {
+  return {
+    id: transcript.id,
+    user_id: transcript.user_id,
+    patient_code: transcript.patient_code,
+    patient_uuid: transcript.patient_uuid,
+    created_at: transcript.created_at,
+    completed_at: transcript.completed_at,
+    transcript: transcript.transcript,
+    transcript_chunk: transcript.transcript_chunk,
+    ai_summary: transcript.ai_summary,
+    ai_short_summary: transcript.ai_short_summary,
+    ai_interim_summaries: transcript.ai_interim_summaries,
+    metadata: transcript.metadata,
+    language: transcript.language
+  };
 }
 
 // ============================================================================
