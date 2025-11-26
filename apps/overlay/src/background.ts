@@ -7,7 +7,7 @@
 
 // Track connected content scripts
 const connectedPorts: Map<number, chrome.runtime.Port> = new Map();
-const tabMetadata: Map<number, { overlayTabId?: string; url?: string; patientHints?: unknown }> = new Map();
+const tabMetadata: Map<number, { overlayTabId?: string; url?: string; patientHint?: unknown }> = new Map();
 
 // Listen for connections from content scripts
 chrome.runtime.onConnect.addListener((port) => {
@@ -41,7 +41,7 @@ function handleContentMessage(tabId: number, message: { type: string; data?: unk
       tabMetadata.set(tabId, {
         overlayTabId: (message.data as any)?.tabId,
         url: (message.data as any)?.url,
-        patientHints: (message.data as any)?.patientHints
+        patientHint: (message.data as any)?.patientHint
       });
       sendActiveState();
       break;
