@@ -1,0 +1,105 @@
+ASSISTMD TEXT DIAGRAMS (ASCII ONLY)
+
+TOP-LEVEL FLOW
+  [Human Doctor]
+        |
+        v
+  [Chrome Tabs w/ Extension]
+        |
+        |  ws://<agent>/ws       http://<agent>/...
+        v
+  [CNS Agent Server]
+        |
+   ----------------------------
+   |            |             |
+   v            v             v
+ [Deepgram]   [Supabase]   (Future MCP/Automation)
+
+MULTI-TAB HANDSHAKE
+  Tab A (EHR main)        Tab B (labs)         Tab C (referral)
+  ----------------        ---------------      -----------------
+  content.js opens WS     content.js opens WS  content.js opens WS
+  send: hello {tabId:A}   send: hello {tabId:B} send: hello {tabId:C}
+  overlay shows local UI  overlay shows UI      overlay shows UI
+
+  Active audio binding chosen when doctor hits Record in one tab:
+    overlay -> ws: {type: bind_audio, tabId: A}
+    backend marks activeTabId=A; others inactive
+    backend emits active_tab_changed to all tabs
+    overlay in Tab A enables recorder; others show "Bound elsewhere"
+
+RECORDING PIPELINE (ACTIVE TAB ONLY)
+  Overlay Record
+    -> Audio capture (PCM 16-bit, 16kHz) -> ws /audio-stream
+    -> Backend StreamManager -> DeepgramConsumer
+    -> Deepgram WS -> diarized transcripts
+    -> ChunkAssembler (~30s chunks, speaker-aware)
+    -> Broadcast feed A {type: transcript, tabId: A, isFinal?}
+    -> Save to Supabase transcripts2 (append transcript_chunk, transcript text)
+
+DATA SHAPES
+  transcripts2 row created on record start:
+    user_id       = doctor UUID (or demo)
+    patient_code  = random PT-XXXXX
+    patient_uuid  = null (until DOM mapping)
+    transcript_chunk = [] (JSONB array)
+    ai_summary    = null (later)
+
+  transcript_chunk element (per chunk):
+    { speaker: 0|1|2, text: "...", start: seconds, end: seconds,
+      word_count: n, raw: [Deepgram words...] }
+
+FEED FANOUT RULES (BACKEND WS)
+  Feed A (transcripts, recorder state) -> all tabs for doctor; tabs ignore if tabId mismatch
+  Feed B (commands: fill-plan/map/undo results) -> originating tab only
+  Feed C (emergency alerts) -> all tabs
+  Feed D (autopilot readiness) -> all tabs
+  Feed E (summaries/structured) -> all tabs
+
+DOM MAPPING + SMART FILL (TAB CONTEXT)
+  overlay/content map_current_page:
+    - scan DOM fields (name, MRN, DOB, textareas, etc.)
+    - send ws: {type: dom_map, tabId, patientHint, fields}
+    - backend stores last map per tab; updates autopilot readiness
+
+  smart_fill command (requested by tab):
+    overlay -> ws: {type: command, action: smart_fill, tabId, summaryRef?, domMapRef?}
+    backend builds steps[] targeting selectors/labels (tab-scoped)
+    backend -> tab feed B: {type: fill_plan, steps}
+    content.js executes steps into active DOM; reports status
+
+SUMMARY GENERATION (ON DEMAND)
+  overlay -> ws: {type: command, action: summarize, tabId}
+  backend collects full transcript text (session memory)
+  backend -> LLM (external) -> ai_summary/short
+  backend saves to transcripts2.ai_summary
+  backend -> feed E: {type: summary_ready, tabId, summary}
+
+PORTS AND PATHS
+  Agent (CNS): 8787 (HTTP + /ws + /audio-stream)
+  Demo EHR:    8788 (static form used for mapping/fill)
+  DevTools:    9222 (remote Chrome for MCP)
+
+ERROR/SIGNAL PATHS
+  Deepgram failure -> feed A deepgram_error -> overlay shows recorder error
+  Supabase offline -> save skipped (log) -> overlay may show DB badge
+  Patient mismatch (multi-patient tabs) -> backend may warn; new transcript row required
+
+STATE SNAPSHOT (PER CLIENT/TAB IN BACKEND MEMORY)
+  session = {
+    clientId, tabId, doctorId,
+    transcriptId, patientCode, patientUuid,
+    active: true|false,
+    chunks: [...], fullTextParts: [...],
+    domMap: lastDomResult|null,
+    autopilot: {ready: bool, surfaces: int, coverage: percent},
+    lastSeen: ISO timestamp
+  }
+
+LIFECYCLE TIMELINE (SINGLE ENCOUNTER)
+  hello -> bind_audio -> start_record
+  live transcripts -> chunk assemble -> Supabase append
+  (optional) summarize -> ai_summary stored
+  (optional) dom_map -> smart_fill plan -> execute
+  stop_record -> deepgram stop -> final flush -> completed_at set
+
