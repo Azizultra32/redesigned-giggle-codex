@@ -19,6 +19,16 @@ export interface DetectedField {
   element: HTMLElement;
 }
 
+export interface FieldSummary {
+  id: string;
+  type: DetectedField['type'];
+  selector: string;
+  label: string;
+  valuePreview: string;
+  fieldType: FieldCategory;
+  confidence: number;
+}
+
 export type FieldCategory =
   | 'patient_name'
   | 'mrn'
@@ -131,7 +141,7 @@ export class DOMMapper {
 
     // Find all input elements
     const inputs = document.querySelectorAll<HTMLInputElement>(
-      'input:not([type="hidden"]):not([type="submit"]):not([type="button"])'
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="password"])'
     );
     inputs.forEach(el => this.processField(el, 'input', fields));
 
@@ -172,6 +182,28 @@ export class DOMMapper {
 
     // Fallback: scan page content for patient info patterns
     return this.extractPatientInfoFromContent();
+  }
+
+  /**
+   * Collect a lightweight snapshot of detected fields and patient hints suitable for UI display.
+   */
+  public getMappingSnapshot(): { fields: FieldSummary[]; patientHint: PatientInfo | null } {
+    const fields = this.detectFields();
+
+    const summaries: FieldSummary[] = fields.map(field => ({
+      id: field.id,
+      type: field.type,
+      selector: field.selector,
+      label: field.label || field.selector,
+      valuePreview: field.value?.substring(0, 120) || '',
+      fieldType: field.fieldType,
+      confidence: field.confidence
+    }));
+
+    return {
+      fields: summaries,
+      patientHint: this.getPatientHint()
+    };
   }
 
   /**
@@ -263,6 +295,17 @@ export class DOMMapper {
 
     fields.push(field);
     this.detectedFields.set(id, field);
+  }
+
+  /**
+   * Attempt to find a detected field by its selector. Falls back to a new scan when needed.
+   */
+  public findFieldBySelector(selector: string): DetectedField | undefined {
+    const existing = Array.from(this.detectedFields.values()).find(field => field.selector === selector);
+    if (existing) return existing;
+
+    const refreshed = this.detectFields();
+    return refreshed.find(field => field.selector === selector);
   }
 
   private generateFieldId(element: HTMLElement): string {
