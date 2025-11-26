@@ -11,16 +11,19 @@ import { TabsComponent } from './ui/tabs';
 import { StatusPills } from './ui/pills';
 import { Bridge } from './bridge';
 import { DOMMapper, PatientInfo } from './domMapper';
+import { DomMapClient } from './domMapClient';
+import { FillResult } from './fillExecutor';
 
 export interface OverlayState {
   isVisible: boolean;
   isRecording: boolean;
   isConnected: boolean;
   isActive: boolean;
-  activeTab: 'transcript' | 'mapping' | 'settings';
+  activeTab: 'transcript' | 'patient' | 'mapping' | 'settings';
   transcriptLines: TranscriptLine[];
   patientInfo: PatientInfo | null;
   warnings: string[];
+  fillSummary: string | null;
 }
 
 export interface TranscriptLine {
@@ -38,6 +41,7 @@ export class FerrariOverlay {
   private state: OverlayState;
   private bridge: Bridge;
   private domMapper: DOMMapper;
+  private domMapClient: DomMapClient;
   private tabId: string;
 
   // UI Components
@@ -46,9 +50,10 @@ export class FerrariOverlay {
   private tabs: TabsComponent;
   private statusPills: StatusPills;
 
-  constructor(bridge: Bridge, domMapper: DOMMapper, tabId: string) {
+  constructor(bridge: Bridge, domMapper: DOMMapper, domMapClient: DomMapClient, tabId: string) {
     this.bridge = bridge;
     this.domMapper = domMapper;
+    this.domMapClient = domMapClient;
     this.tabId = tabId;
     this.state = this.getInitialState();
 
@@ -67,6 +72,7 @@ export class FerrariOverlay {
 
     this.setupEventListeners();
     this.render();
+    this.updateUI();
   }
 
   private getInitialState(): OverlayState {
@@ -78,7 +84,8 @@ export class FerrariOverlay {
       activeTab: 'transcript',
       transcriptLines: [],
       patientInfo: null,
-      warnings: []
+      warnings: [],
+      fillSummary: null
     };
   }
 
@@ -97,6 +104,16 @@ export class FerrariOverlay {
     this.bridge.on('patient', (info: PatientInfo & { tabId?: string }) => {
       if (info.tabId && info.tabId !== this.tabId) return;
       this.setState({ patientInfo: info });
+    });
+
+    this.bridge.on('fill-steps', (data: { tabId?: string; result: FillResult }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.setState({ fillSummary: this.describeFillResult(data.result) });
+    });
+
+    this.bridge.on('fill-undo', (data: { tabId?: string; result: FillResult }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.setState({ fillSummary: this.describeFillResult(data.result, 'Undo complete') });
     });
 
     this.bridge.on('active_tab_changed', (data: { tabId?: string; isActive: boolean }) => {
@@ -140,6 +157,24 @@ export class FerrariOverlay {
 
   private handleTabChange(tab: OverlayState['activeTab']): void {
     this.setState({ activeTab: tab });
+  }
+
+  private async handleSendDomMap(): Promise<void> {
+    try {
+      await this.domMapClient.sendDomMap();
+      this.setState({ fillSummary: 'DOM map sent for binding.' });
+    } catch (error) {
+      console.error('[Ferrari] Failed to send DOM map:', error);
+      this.setState({
+        warnings: Array.from(new Set([...this.state.warnings, 'Unable to send DOM map.'])),
+        fillSummary: 'Unable to send DOM map.'
+      });
+    }
+  }
+
+  private handleUndoFill(): void {
+    const result = this.domMapClient.undoLastFill();
+    this.setState({ fillSummary: this.describeFillResult(result, 'Undid last fill') });
   }
 
   private async startRecording(): Promise<void> {
@@ -220,6 +255,7 @@ export class FerrariOverlay {
     this.tabs.setActiveTab(this.state.activeTab);
 
     this.updateBanner();
+    this.updatePatientPanel();
   }
 
   public async sendHello(): Promise<void> {
@@ -263,6 +299,30 @@ export class FerrariOverlay {
       <div class="overlay-tabs" id="tabs-container"></div>
       <div class="overlay-content">
         <div class="tab-panel" id="transcript-panel"></div>
+        <div class="tab-panel hidden" id="patient-panel">
+          <div class="patient-section">
+            <h4>Patient hint</h4>
+            <div class="patient-grid">
+              <div>
+                <div class="label">Name</div>
+                <div class="value" id="patient-name">Not detected</div>
+              </div>
+              <div>
+                <div class="label">MRN</div>
+                <div class="value" id="patient-mrn">Not detected</div>
+              </div>
+              <div>
+                <div class="label">DOB</div>
+                <div class="value" id="patient-dob">—</div>
+              </div>
+            </div>
+            <div class="patient-actions">
+              <button class="primary" id="send-dom-map">Bind patient</button>
+              <button class="secondary" id="undo-fill">Undo fill</button>
+            </div>
+            <div class="summary" id="fill-summary"></div>
+          </div>
+        </div>
         <div class="tab-panel hidden" id="mapping-panel">
           <p>DOM field mapping controls</p>
         </div>
@@ -285,6 +345,7 @@ export class FerrariOverlay {
     if (tabsContainer) this.tabs.mount(tabsContainer);
     if (transcriptPanel) this.transcriptView.mount(transcriptPanel);
     if (controlsContainer) this.controlButtons.mount(controlsContainer);
+    this.attachPatientHandlers();
 
     // Setup minimize button
     const minimizeBtn = this.shadowRoot.querySelector('.minimize-btn');
@@ -316,6 +377,36 @@ export class FerrariOverlay {
 
     banner.textContent = messages.join(' • ');
     banner.classList.remove('hidden');
+  }
+
+  private attachPatientHandlers(): void {
+    const sendDomMapBtn = this.shadowRoot.getElementById('send-dom-map');
+    const undoFillBtn = this.shadowRoot.getElementById('undo-fill');
+
+    sendDomMapBtn?.addEventListener('click', () => this.handleSendDomMap());
+    undoFillBtn?.addEventListener('click', () => this.handleUndoFill());
+  }
+
+  private updatePatientPanel(): void {
+    const nameEl = this.shadowRoot.getElementById('patient-name');
+    const mrnEl = this.shadowRoot.getElementById('patient-mrn');
+    const dobEl = this.shadowRoot.getElementById('patient-dob');
+    const summaryEl = this.shadowRoot.getElementById('fill-summary');
+
+    if (nameEl) nameEl.textContent = this.state.patientInfo?.name || 'Not detected';
+    if (mrnEl) mrnEl.textContent = this.state.patientInfo?.mrn || 'Not detected';
+    if (dobEl) dobEl.textContent = this.state.patientInfo?.dob || '—';
+    if (summaryEl) summaryEl.textContent = this.state.fillSummary || '';
+  }
+
+  private describeFillResult(result: FillResult, prefix?: string): string {
+    const parts: string[] = [];
+    if (prefix) parts.push(prefix);
+    if (result.applied > 0) parts.push(`Applied ${result.applied}`);
+    if (result.skipped > 0) parts.push(`Skipped ${result.skipped}`);
+    if (result.failed > 0) parts.push(`Failed ${result.failed}`);
+
+    return parts.length ? parts.join(' • ') : 'No changes applied.';
   }
 
   private getStyles(): string {
@@ -416,6 +507,58 @@ export class FerrariOverlay {
 
       .tab-panel.hidden {
         display: none;
+      }
+
+      .patient-section {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .patient-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .patient-grid .label {
+        font-size: 12px;
+        color: #a5a5c5;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+
+      .patient-grid .value {
+        font-size: 14px;
+        color: #e6e6f0;
+        font-weight: 600;
+      }
+
+      .patient-actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      .patient-actions button {
+        padding: 10px 12px;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: 600;
+        color: white;
+      }
+
+      .patient-actions .primary {
+        background: #e63946;
+      }
+
+      .patient-actions .secondary {
+        background: #3d3d5c;
+      }
+
+      .summary {
+        font-size: 12px;
+        color: #a5a5c5;
       }
 
       .overlay-footer {

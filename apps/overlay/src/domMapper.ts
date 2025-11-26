@@ -39,6 +39,17 @@ export interface PatientInfo {
   dob?: string;
 }
 
+export interface DomMap {
+  patient: PatientInfo | null;
+  fields: Array<{
+    selector: string;
+    label: string;
+    fieldType: FieldCategory;
+    value: string;
+  }>;
+  url: string;
+}
+
 // Common field label patterns for healthcare forms
 const FIELD_PATTERNS: Record<FieldCategory, RegExp[]> = {
   patient_name: [
@@ -188,6 +199,27 @@ export class DOMMapper {
    */
   public getPatientHints(): PatientInfo | null {
     return this.getPatientHint();
+  }
+
+  /**
+   * Build a DOM map containing detected fields and patient hints.
+   *
+   * This payload is sent to the backend over WebSocket so it should avoid
+   * circular references and only include serializable data.
+   */
+  public buildDomMap(): DomMap {
+    const fields = this.detectFields().map(field => ({
+      selector: field.selector,
+      label: field.label,
+      fieldType: field.fieldType,
+      value: field.value
+    }));
+
+    return {
+      patient: this.getPatientHint(),
+      fields,
+      url: window.location.href
+    };
   }
 
   /**
