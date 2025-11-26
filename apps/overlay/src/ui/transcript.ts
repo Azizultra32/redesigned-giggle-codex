@@ -11,6 +11,8 @@ export interface TranscriptLine {
   text: string;
   timestamp: number;
   isFinal: boolean;
+  status?: 'interim' | 'final';
+  feed?: string;
 }
 
 export class TranscriptView {
@@ -19,6 +21,7 @@ export class TranscriptView {
   private linesContainer: HTMLElement | null = null;
   private lines: TranscriptLine[] = [];
   private autoScroll: boolean = true;
+  private maxVisibleLines = 300;
 
   constructor(shadowRoot: ShadowRoot) {
     this.shadowRoot = shadowRoot;
@@ -104,55 +107,56 @@ export class TranscriptView {
       return;
     }
 
-    // Group consecutive lines by speaker
-    const groupedLines = this.groupBySpeaker(this.lines);
+    const start = Math.max(0, this.lines.length - this.maxVisibleLines);
+    const visibleLines = this.lines.slice(start);
+    const hiddenCount = this.lines.length - visibleLines.length;
 
-    groupedLines.forEach(group => {
-      const groupEl = document.createElement('div');
-      groupEl.className = 'speaker-group';
+    if (hiddenCount > 0) {
+      const overflowNotice = document.createElement('div');
+      overflowNotice.className = 'overflow-notice';
+      overflowNotice.textContent = `Showing latest ${visibleLines.length} entries. ${hiddenCount} older lines hidden for performance.`;
+      this.linesContainer.appendChild(overflowNotice);
+    }
 
-      // Speaker header
-      const speakerHeader = document.createElement('div');
-      speakerHeader.className = 'speaker-header';
-      speakerHeader.innerHTML = `
-        <span class="speaker-badge" data-speaker="${group.speaker}">
-          ${this.getSpeakerLabel(group.speaker)}
-        </span>
-        <span class="timestamp">${this.formatTime(group.lines[0].timestamp)}</span>
-      `;
-      groupEl.appendChild(speakerHeader);
+    visibleLines.forEach(line => {
+      const lineEl = document.createElement('div');
+      lineEl.className = `transcript-line ${line.isFinal ? 'final' : 'interim'}`;
+      lineEl.dataset.lineId = line.id;
 
-      // Lines
-      group.lines.forEach(line => {
-        const lineEl = document.createElement('div');
-        lineEl.className = `transcript-line ${line.isFinal ? 'final' : 'interim'}`;
-        lineEl.dataset.lineId = line.id;
-        lineEl.textContent = line.text;
-        groupEl.appendChild(lineEl);
-      });
+      const header = document.createElement('div');
+      header.className = 'line-header';
 
-      this.linesContainer!.appendChild(groupEl);
+      const speakerBadge = document.createElement('span');
+      speakerBadge.className = 'speaker-badge';
+      speakerBadge.dataset.speaker = line.speaker;
+      speakerBadge.textContent = this.getSpeakerLabel(line.speaker);
+
+      const statusBadge = document.createElement('span');
+      statusBadge.className = `status-badge ${line.isFinal ? 'final' : 'interim'}`;
+      statusBadge.textContent = line.isFinal ? 'Final' : 'Interim';
+
+      const timestamp = document.createElement('span');
+      timestamp.className = 'timestamp';
+      timestamp.textContent = this.formatTime(line.timestamp);
+
+      header.appendChild(speakerBadge);
+      header.appendChild(statusBadge);
+      header.appendChild(timestamp);
+
+      const textEl = document.createElement('div');
+      textEl.className = 'line-text';
+      textEl.textContent = line.text;
+
+      lineEl.appendChild(header);
+      lineEl.appendChild(textEl);
+
+      this.linesContainer!.appendChild(lineEl);
     });
 
     // Auto-scroll to bottom
     if (this.autoScroll) {
       this.linesContainer.scrollTop = this.linesContainer.scrollHeight;
     }
-  }
-
-  private groupBySpeaker(lines: TranscriptLine[]): { speaker: string; lines: TranscriptLine[] }[] {
-    const groups: { speaker: string; lines: TranscriptLine[] }[] = [];
-    let currentGroup: { speaker: string; lines: TranscriptLine[] } | null = null;
-
-    lines.forEach(line => {
-      if (!currentGroup || currentGroup.speaker !== line.speaker) {
-        currentGroup = { speaker: line.speaker, lines: [] };
-        groups.push(currentGroup);
-      }
-      currentGroup.lines.push(line);
-    });
-
-    return groups;
   }
 
   private getSpeakerLabel(speaker: string): string {
@@ -239,11 +243,10 @@ export class TranscriptView {
         margin-bottom: 16px;
       }
 
-      .speaker-header {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-bottom: 6px;
+      .overflow-notice {
+        font-size: 11px;
+        color: #888;
+        padding: 4px 0 8px;
       }
 
       .speaker-badge {
@@ -252,6 +255,13 @@ export class TranscriptView {
         padding: 2px 8px;
         border-radius: 10px;
         text-transform: uppercase;
+      }
+
+      .line-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
       }
 
       .speaker-badge[data-speaker="0"],
@@ -269,22 +279,46 @@ export class TranscriptView {
       .timestamp {
         font-size: 10px;
         color: #555;
+        margin-left: auto;
       }
 
       .transcript-line {
         font-size: 13px;
         line-height: 1.5;
         color: #ddd;
-        padding: 2px 0;
+        padding: 8px 6px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.02);
+        margin-bottom: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.04);
       }
 
-      .transcript-line.interim {
-        color: #888;
+      .line-text {
+        white-space: pre-wrap;
+      }
+
+      .status-badge {
+        font-size: 10px;
+        padding: 2px 6px;
+        border-radius: 6px;
+        border: 1px solid transparent;
+      }
+
+      .status-badge.final {
+        background: rgba(76, 175, 80, 0.15);
+        color: #7cd67f;
+        border-color: rgba(76, 175, 80, 0.25);
+      }
+
+      .status-badge.interim {
+        background: rgba(255, 152, 0, 0.15);
+        color: #ffb74d;
+        border-color: rgba(255, 152, 0, 0.25);
+      }
+
+      .transcript-line.interim .line-text {
+        color: #b0b0b0;
         font-style: italic;
-      }
-
-      .transcript-line.final {
-        color: #eee;
       }
 
       .empty-state {
