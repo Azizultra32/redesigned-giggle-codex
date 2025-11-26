@@ -18,9 +18,11 @@ export type BridgeEventType =
   | 'map-fields'
   | 'fields-detected'
   | 'fields-changed'
+  | 'dom-coverage'
   | 'get-patient-info'
   | 'server-error'
-  | 'toggle-overlay';
+  | 'toggle-overlay'
+  | 'feed-status';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 

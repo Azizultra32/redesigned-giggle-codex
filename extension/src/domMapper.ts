@@ -148,6 +148,7 @@ export class DOMMapper {
     editables.forEach(el => this.processField(el, 'contenteditable', fields));
 
     console.log(`[DOMMapper] Detected ${fields.length} fields`);
+    this.publishCoverage(fields);
     return fields;
   }
 
@@ -411,6 +412,7 @@ export class DOMMapper {
 
       if (shouldRescan) {
         console.log('[DOMMapper] DOM changed, rescanning fields...');
+        this.detectFields();
         this.bridge.emit('fields-changed', {});
       }
     });
@@ -419,6 +421,9 @@ export class DOMMapper {
       childList: true,
       subtree: true
     });
+
+    // Initial coverage snapshot
+    this.detectFields();
   }
 
   public destroy(): void {
@@ -427,5 +432,37 @@ export class DOMMapper {
       this.observer = null;
     }
     this.detectedFields.clear();
+  }
+
+  private publishCoverage(fields: DetectedField[]): void {
+    const trackedCategories: FieldCategory[] = [
+      'patient_name',
+      'mrn',
+      'dob',
+      'chief_complaint',
+      'history_present_illness',
+      'assessment',
+      'plan',
+      'medications',
+      'allergies',
+      'vitals'
+    ];
+
+    const presentCategories = new Set<FieldCategory>();
+    fields.forEach(field => {
+      if (trackedCategories.includes(field.fieldType)) {
+        presentCategories.add(field.fieldType);
+      }
+    });
+
+    const coverage = Math.round((presentCategories.size / trackedCategories.length) * 100);
+
+    this.bridge.emit('dom-coverage', {
+      coverage,
+      coveredCategories: presentCategories.size,
+      totalCategories: trackedCategories.length,
+      fieldCount: fields.length,
+      timestamp: Date.now()
+    });
   }
 }
