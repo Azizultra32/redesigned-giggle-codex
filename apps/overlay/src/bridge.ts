@@ -25,7 +25,9 @@ export type BridgeEventType =
   | 'server-error'
   | 'toggle-overlay'
   | 'mcp-fill-sample'
-  | 'mcp-fill-result';
+  | 'mcp-fill-result'
+  | 'mcp-plan-step'
+  | 'mcp-plan-result';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 

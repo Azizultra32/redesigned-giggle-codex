@@ -12,6 +12,21 @@ import { Bridge } from './bridge';
 import { AudioCapture } from './audio-capture';
 import { DOMMapper, DetectedField } from './domMapper';
 
+interface PatientContext {
+  name?: string;
+  mrn?: string;
+  dob?: string;
+}
+
+interface SmartFillStep {
+  action: 'switch-tab' | 'click' | 'type' | 'focus-field' | 'wait';
+  selector?: string;
+  value?: string;
+  description?: string;
+  durationMs?: number;
+  fieldId?: string;
+}
+
 // Prevent multiple injections
 if ((window as any).__GHOST_NEXT_INJECTED__) {
   console.log('[GHOST-NEXT] Already injected, skipping...');
@@ -119,6 +134,39 @@ function setupBridgeHandlers(
     });
   });
 
+  bridge.on('mcp-plan-step', async (payload: {
+    step?: SmartFillStep;
+    requestId?: string;
+    tabId?: string;
+    patient?: PatientContext;
+  }) => {
+    if (payload?.tabId && payload.tabId !== localTabId) return;
+
+    const step = payload?.step;
+    if (!step) return;
+
+    const safety = verifyPlanPatientContext(domMapper, step, payload.patient);
+    if (!safety.safe) {
+      await bridge.emit('mcp-plan-result', {
+        success: false,
+        message: safety.reason || 'Patient safety check failed before executing Smart Fill step.',
+        requestId: payload?.requestId,
+        tabId: localTabId,
+        patientHint: safety.patientHint
+      });
+      return;
+    }
+
+    const result = await executeSmartFillStep(domMapper, step);
+
+    await bridge.emit('mcp-plan-result', {
+      ...result,
+      requestId: payload?.requestId,
+      tabId: localTabId,
+      patientHint: safety.patientHint
+    });
+  });
+
   // Handle messages from background service worker
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[GHOST-NEXT] Received message from background:', message);
@@ -205,6 +253,143 @@ function selectFillTarget(fields: DetectedField[]): DetectedField | undefined {
   }
 
   return fields[0];
+}
+
+async function executeSmartFillStep(domMapper: DOMMapper, step: SmartFillStep): Promise<{ success: boolean; message: string; targetField?: string }> {
+  try {
+    switch (step.action) {
+      case 'wait': {
+        const duration = step.durationMs ?? 300;
+        await new Promise(resolve => setTimeout(resolve, duration));
+        return { success: true, message: step.description || `Waited ${duration}ms.` };
+      }
+
+      case 'click': {
+        const target = findTargetElement(domMapper, step);
+        if (!target.element) {
+          return { success: false, message: 'Target element not found for click step.' };
+        }
+
+        target.element.focus();
+        target.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        return {
+          success: true,
+          message: step.description || 'Clicked target element.',
+          targetField: target.selector
+        };
+      }
+
+      case 'type': {
+        const target = findTargetElement(domMapper, step);
+        if (!target.element) {
+          return { success: false, message: 'Target element not found for type step.' };
+        }
+
+        const valueToWrite = step.value ?? '';
+
+        if (target.fieldId) {
+          const success = domMapper.setFieldValue(target.fieldId, valueToWrite);
+          return {
+            success,
+            message: success ? 'Applied Smart Fill value into field.' : 'Failed to write value via DOM mapper.',
+            targetField: target.selector
+          };
+        }
+
+        applyValueToElement(target.element, valueToWrite);
+        return {
+          success: true,
+          message: step.description || 'Typed value into target element.',
+          targetField: target.selector
+        };
+      }
+
+      case 'focus-field': {
+        const target = findTargetElement(domMapper, step);
+        if (!target.element) {
+          return { success: false, message: 'Target element not found for focus step.' };
+        }
+
+        target.element.focus();
+        target.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return {
+          success: true,
+          message: step.description || 'Focused target element.',
+          targetField: target.selector
+        };
+      }
+
+      default:
+        return { success: false, message: `Unsupported Smart Fill step: ${step.action}` };
+    }
+  } catch (error) {
+    return { success: false, message: `Smart Fill step failed: ${String(error)}` };
+  }
+}
+
+function verifyPlanPatientContext(
+  domMapper: DOMMapper,
+  step: SmartFillStep,
+  patient?: PatientContext
+): { safe: boolean; reason?: string; patientHint?: PatientContext } {
+  if (step.action !== 'type') {
+    return { safe: true, patientHint: domMapper.getPatientHint() || undefined };
+  }
+
+  const patientHint = domMapper.getPatientHint() || undefined;
+  if (patient && patientHint) {
+    const mrnMismatch = patient.mrn && patientHint.mrn && normalize(patient.mrn) !== normalize(patientHint.mrn);
+    const nameMismatch = patient.name && patientHint.name && normalize(patient.name) !== normalize(patientHint.name);
+
+    if (mrnMismatch || nameMismatch) {
+      return {
+        safe: false,
+        reason: 'Patient context from plan does not match detected patient on page.',
+        patientHint
+      };
+    }
+  }
+
+  return { safe: true, patientHint };
+}
+
+function findTargetElement(domMapper: DOMMapper, step: SmartFillStep): {
+  element?: HTMLElement;
+  selector?: string;
+  fieldId?: string;
+} {
+  const fields = domMapper.detectFields();
+  const field = fields.find(
+    candidate => candidate.id === step.fieldId || (step.selector && candidate.selector === step.selector)
+  );
+
+  if (field) {
+    return { element: field.element, selector: field.selector, fieldId: field.id };
+  }
+
+  if (step.selector) {
+    const element = document.querySelector<HTMLElement>(step.selector);
+    if (element) {
+      return { element, selector: step.selector };
+    }
+  }
+
+  return {};
+}
+
+function applyValueToElement(element: HTMLElement, value: string): void {
+  if ('value' in element) {
+    (element as HTMLInputElement).value = value;
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  } else {
+    element.textContent = value;
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+function normalize(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 // Cleanup on page unload
