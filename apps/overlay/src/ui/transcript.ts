@@ -5,13 +5,7 @@
  * Shows interim and final transcript lines with timestamps.
  */
 
-export interface TranscriptLine {
-  id: string;
-  speaker: string;
-  text: string;
-  timestamp: number;
-  isFinal: boolean;
-}
+import { TranscriptLine } from '../types';
 
 export class TranscriptView {
   private shadowRoot: ShadowRoot;

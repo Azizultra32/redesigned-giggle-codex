@@ -2,12 +2,15 @@
  * Tabs Component
  *
  * Tab navigation for switching between overlay panels:
+ * - Summary
+ * - SOAP
  * - Transcript view
- * - Field mapping
- * - Settings
+ * - Tasks
+ * - Patient
+ * - Debug
  */
 
-export type TabId = 'transcript' | 'mapping' | 'settings';
+import { TabId } from '../types';
 
 interface Tab {
   id: TabId;
@@ -16,15 +19,20 @@ interface Tab {
 }
 
 const TABS: Tab[] = [
+  { id: 'summary', label: 'Summary', icon: '📌' },
+  { id: 'soap', label: 'SOAP', icon: '🩺' },
   { id: 'transcript', label: 'Transcript', icon: '📝' },
-  { id: 'mapping', label: 'Mapping', icon: '🎯' },
-  { id: 'settings', label: 'Settings', icon: '⚙️' }
+  { id: 'tasks', label: 'Tasks', icon: '✅' },
+  { id: 'patient', label: 'Patient', icon: '👤' },
+  { id: 'debug', label: 'Debug', icon: '🐛' }
 ];
 
 export class TabsComponent {
   private shadowRoot: ShadowRoot;
   private container: HTMLElement | null = null;
-  private activeTab: TabId = 'transcript';
+  private activeTab: TabId = 'summary';
+  private boundTab: TabId | null = null;
+  private boundActive: boolean = true;
   private onTabChange: (tab: TabId) => void;
 
   constructor(shadowRoot: ShadowRoot, onTabChange: (tab: TabId) => void) {
@@ -39,6 +47,12 @@ export class TabsComponent {
 
   public setActiveTab(tabId: TabId): void {
     this.activeTab = tabId;
+    this.updateActiveState();
+  }
+
+  public setBoundTab(tabId: TabId | null, isActive: boolean): void {
+    this.boundTab = tabId;
+    this.boundActive = isActive;
     this.updateActiveState();
   }
 
@@ -83,6 +97,15 @@ export class TabsComponent {
       .tab-icon {
         font-size: 14px;
       }
+
+      .tab-binding {
+        font-size: 10px;
+        color: #e63946;
+      }
+
+      .tab-binding.inactive {
+        color: #888;
+      }
     `;
 
     // Create tabs
@@ -95,7 +118,8 @@ export class TabsComponent {
       button.dataset.tab = tab.id;
       button.innerHTML = `
         <span class="tab-icon">${tab.icon}</span>
-        <span>${tab.label}</span>
+        <span class="tab-label">${tab.label}</span>
+        <span class="tab-binding" aria-hidden="true"></span>
       `;
 
       button.addEventListener('click', () => {
@@ -119,6 +143,13 @@ export class TabsComponent {
       const button = btn as HTMLElement;
       const isActive = button.dataset.tab === this.activeTab;
       button.classList.toggle('active', isActive);
+
+      const binding = button.querySelector('.tab-binding');
+      const isBoundTab = this.boundTab !== null && button.dataset.tab === this.boundTab;
+      if (binding) {
+        binding.textContent = isBoundTab ? (this.boundActive ? '●' : '○') : '';
+        binding.classList.toggle('inactive', isBoundTab && !this.boundActive);
+      }
     });
 
     // Update panel visibility

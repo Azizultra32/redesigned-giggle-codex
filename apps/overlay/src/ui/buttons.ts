@@ -8,6 +8,7 @@
 export interface ButtonState {
   isRecording: boolean;
   isConnected: boolean;
+  isActive: boolean;
 }
 
 export type ControlAction = 'start' | 'stop' | 'clear' | 'minimize' | 'map';
@@ -15,7 +16,7 @@ export type ControlAction = 'start' | 'stop' | 'clear' | 'minimize' | 'map';
 export class ControlButtons {
   private shadowRoot: ShadowRoot;
   private container: HTMLElement | null = null;
-  private state: ButtonState = { isRecording: false, isConnected: false };
+  private state: ButtonState = { isRecording: false, isConnected: false, isActive: true };
   private onAction: (action: ControlAction) => void;
 
   constructor(shadowRoot: ShadowRoot, onAction: (action: ControlAction) => void) {
@@ -109,7 +110,7 @@ export class ControlButtons {
       // Disable controls if not connected
       const allButtons = this.container.querySelectorAll('.control-btn');
       allButtons.forEach(btn => {
-        (btn as HTMLButtonElement).disabled = !this.state.isConnected;
+        (btn as HTMLButtonElement).disabled = !this.state.isConnected || !this.state.isActive;
       });
     }
   }

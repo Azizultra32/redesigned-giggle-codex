@@ -19,6 +19,12 @@ export type BridgeEventType =
   | 'fields-detected'
   | 'fields-changed'
   | 'get-patient-info'
+  | 'summary_update'
+  | 'soap_update'
+  | 'tasks_update'
+  | 'autopilot_update'
+  | 'debug_log'
+  | 'active_tab_changed'
   | 'server-error'
   | 'toggle-overlay';
 

@@ -5,12 +5,14 @@
  * as compact pill-shaped badges in the header.
  */
 
-import { PatientInfo } from '../overlay';
+import { PatientInfo, TabId } from '../types';
 
 export interface PillsState {
   isConnected: boolean;
   isRecording: boolean;
   patientInfo: PatientInfo | null;
+  boundTab: TabId | null;
+  isTabActive: boolean;
 }
 
 export class StatusPills {
@@ -19,7 +21,9 @@ export class StatusPills {
   private state: PillsState = {
     isConnected: false,
     isRecording: false,
-    patientInfo: null
+    patientInfo: null,
+    boundTab: null,
+    isTabActive: true
   };
 
   constructor(shadowRoot: ShadowRoot) {
@@ -57,6 +61,10 @@ export class StatusPills {
       <span class="status-pill patient-pill hidden" title="">
         <span class="pill-icon">👤</span>
         <span class="pill-text patient-name"></span>
+      </span>
+      <span class="status-pill binding-pill hidden" title="">
+        <span class="pill-icon">🧲</span>
+        <span class="pill-text binding-text"></span>
       </span>
     `;
 
@@ -97,6 +105,23 @@ export class StatusPills {
         patientPill.title = this.getPatientTooltip();
       } else {
         patientPill.classList.add('hidden');
+      }
+    }
+
+    // Update binding pill
+    const bindingPill = this.container.querySelector('.binding-pill') as HTMLElement;
+    if (bindingPill) {
+      if (this.state.boundTab) {
+        bindingPill.classList.remove('hidden');
+        const textEl = bindingPill.querySelector('.binding-text');
+        if (textEl) {
+          textEl.textContent = `${this.state.boundTab.toUpperCase()} ${
+            this.state.isTabActive ? 'active' : 'inactive'
+          }`;
+        }
+        bindingPill.dataset.state = this.state.isTabActive ? 'active' : 'inactive';
+      } else {
+        bindingPill.classList.add('hidden');
       }
     }
   }
@@ -185,6 +210,11 @@ export class StatusPills {
         background: rgba(33, 150, 243, 0.2);
         color: #64b5f6;
         cursor: help;
+      }
+
+      .binding-pill[data-state="inactive"] {
+        background: rgba(255, 193, 7, 0.2);
+        color: #ffb74d;
       }
     `;
   }

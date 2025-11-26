@@ -14,14 +14,14 @@ import { DOMMapper } from './domMapper';
 
 // Prevent multiple injections
 if ((window as any).__GHOST_NEXT_INJECTED__) {
-  console.log('[GHOST-NEXT] Already injected, skipping...');
+  console.log('[Ferrari] Already injected, skipping...');
 } else {
   (window as any).__GHOST_NEXT_INJECTED__ = true;
   initializeOverlay();
 }
 
 async function initializeOverlay(): Promise<void> {
-  console.log('[GHOST-NEXT] Initializing Ferrari Overlay...');
+  console.log('[Ferrari] Initializing Ferrari Overlay...');
 
   try {
     // Initialize bridge for messaging
@@ -43,9 +43,9 @@ async function initializeOverlay(): Promise<void> {
     // Connect to background service worker
     await bridge.connect();
 
-    console.log('[GHOST-NEXT] Ferrari Overlay initialized successfully');
+    console.log('[Ferrari] Ferrari Overlay initialized successfully');
   } catch (error) {
-    console.error('[GHOST-NEXT] Failed to initialize overlay:', error);
+    console.error('[Ferrari] Failed to initialize overlay:', error);
   }
 }
 
@@ -60,7 +60,7 @@ function setupBridgeHandlers(
       await audioCapture.start();
       bridge.emit('recording-started', {});
     } catch (error) {
-      console.error('[GHOST-NEXT] Failed to start recording:', error);
+      console.error('[Ferrari] Failed to start recording:', error);
       bridge.emit('recording-error', { error: String(error) });
     }
   });
@@ -70,7 +70,7 @@ function setupBridgeHandlers(
       await audioCapture.stop();
       bridge.emit('recording-stopped', {});
     } catch (error) {
-      console.error('[GHOST-NEXT] Failed to stop recording:', error);
+      console.error('[Ferrari] Failed to stop recording:', error);
     }
   });
 
@@ -87,7 +87,7 @@ function setupBridgeHandlers(
 
   // Handle messages from background service worker
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    console.log('[GHOST-NEXT] Received message from background:', message);
+    console.log('[Ferrari] Received message from background:', message);
 
     switch (message.type) {
       case 'TOGGLE_OVERLAY':
@@ -122,6 +122,6 @@ function setupBridgeHandlers(
 
 // Cleanup on page unload
 window.addEventListener('beforeunload', () => {
-  console.log('[GHOST-NEXT] Page unloading, cleaning up...');
+  console.log('[Ferrari] Page unloading, cleaning up...');
   // Bridge and audio capture will handle their own cleanup
 });
