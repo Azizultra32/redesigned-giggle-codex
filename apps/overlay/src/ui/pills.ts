@@ -11,6 +11,12 @@ export interface PillsState {
   isConnected: boolean;
   isRecording: boolean;
   patientInfo: PatientInfo | null;
+  autopilot?: {
+    ready: boolean;
+    coverage: number;
+    reason?: string;
+    surfaces: number;
+  } | null;
 }
 
 export class StatusPills {
@@ -58,6 +64,10 @@ export class StatusPills {
         <span class="pill-icon">👤</span>
         <span class="pill-text patient-name"></span>
       </span>
+      <span class="status-pill autopilot-pill" data-state="idle" title="Autopilot readiness">
+        <span class="pill-icon">🤖</span>
+        <span class="pill-text autopilot-text">Autopilot</span>
+      </span>
     `;
 
     this.container.appendChild(styles);
@@ -97,6 +107,32 @@ export class StatusPills {
         patientPill.title = this.getPatientTooltip();
       } else {
         patientPill.classList.add('hidden');
+      }
+    }
+
+    const autopilotPill = this.container.querySelector('.autopilot-pill');
+    if (autopilotPill) {
+      const autopilotState = this.state.autopilot;
+      const textEl = autopilotPill.querySelector('.autopilot-text');
+
+      if (autopilotState) {
+        const stateValue = autopilotState.ready ? 'ready' : 'blocked';
+        autopilotPill.setAttribute('data-state', stateValue);
+
+        if (textEl) {
+          textEl.textContent = autopilotState.ready
+            ? `Autopilot Ready (${autopilotState.coverage}% coverage)`
+            : 'Autopilot Pending';
+        }
+
+        (autopilotPill as HTMLElement).title = autopilotState.reason
+          ? `${autopilotState.reason}\nSurfaces: ${autopilotState.surfaces}`
+          : `Surfaces: ${autopilotState.surfaces}`;
+      } else {
+        autopilotPill.setAttribute('data-state', 'idle');
+        if (textEl) {
+          textEl.textContent = 'Autopilot';
+        }
       }
     }
   }
@@ -185,6 +221,21 @@ export class StatusPills {
         background: rgba(33, 150, 243, 0.2);
         color: #64b5f6;
         cursor: help;
+      }
+
+      .autopilot-pill {
+        background: rgba(156, 39, 176, 0.2);
+        color: #e1bee7;
+      }
+
+      .autopilot-pill[data-state="ready"] {
+        background: rgba(76, 175, 80, 0.25);
+        color: #b2f5ea;
+      }
+
+      .autopilot-pill[data-state="blocked"] {
+        background: rgba(255, 193, 7, 0.25);
+        color: #ffe082;
       }
     `;
   }

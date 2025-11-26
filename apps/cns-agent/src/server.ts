@@ -25,7 +25,7 @@ import {
   getLatestTranscript,
   generateEphemeralPatientCode
 } from './lib/supabase.js';
-import { TranscriptChunk, TranscriptEvent, DomMap } from './types/index.js';
+import { AutopilotInfo, TranscriptChunk, TranscriptEvent, DomMap } from './types/index.js';
 
 // Load environment variables
 config();
@@ -192,6 +192,30 @@ const sessions = new Map<WebSocket, Session>();
 const sessionsByUser = new Map<string, Map<string, Session>>();
 const activeTabByUser = new Map<string, string>();
 
+function deriveAutopilotState(session: Session, reason?: string, readinessOverride?: boolean): AutopilotInfo {
+  const patientHint = session.patientHint ?? session.lastPatientHint ?? null;
+  const surfaceCount = patientHint && typeof patientHint === 'object'
+    ? Object.keys(patientHint).length
+    : patientHint
+      ? 1
+      : 0;
+
+  const baseCoverage = surfaceCount > 0 ? 40 + surfaceCount * 15 : 20;
+  const coverage = Math.min(100, baseCoverage + (session.isRecording ? 20 : 0));
+  const ready = readinessOverride !== undefined ? readinessOverride : surfaceCount > 0 || session.isRecording;
+  const adjustedCoverage = !ready ? Math.min(coverage, 40) : coverage;
+
+  return {
+    feed: 'D',
+    ready,
+    coverage: Math.round(adjustedCoverage),
+    surfaces: surfaceCount,
+    reason: reason || (ready ? 'Autopilot primed for suggestions' : 'Waiting for patient context'),
+    tabId: session.tabId || undefined,
+    timestamp: new Date().toISOString()
+  };
+}
+
 wss.on('connection', (ws: WebSocket, req) => {
   const url = new URL(req.url || '', 'http://localhost');
   const userId = url.searchParams.get('userId') || DEMO_DOCTOR_ID;
@@ -315,6 +339,8 @@ function handleHello(session: Session, message: any): void {
 
   addSessionForUser(session);
 
+  wsBridge.updateAutopilotReadiness(deriveAutopilotState(session, 'Patient context received'));
+
   send(session.ws, {
     type: 'hello_ack',
     tabId: session.tabId,
@@ -426,6 +452,8 @@ async function startRecording(session: Session, message: any): Promise<void> {
     // Update Feed A status
     wsBridge.updateFeedStatus('A', 'connected', session.tabId || undefined);
 
+    wsBridge.updateAutopilotReadiness(deriveAutopilotState(session, 'Recording started'));
+
     // Start periodic save timer (every 5 seconds)
     session.saveTimer = setInterval(async () => {
       await savePendingChunks(session);
@@ -485,6 +513,10 @@ async function stopRecording(session: Session): Promise<void> {
 
     // Update Feed A status
     wsBridge.updateFeedStatus('A', 'disconnected', session.tabId || undefined);
+
+    wsBridge.updateAutopilotReadiness(
+      deriveAutopilotState(session, 'Recording stopped, autopilot paused', false)
+    );
 
     send(session.ws, {
       type: 'recording_stopped',

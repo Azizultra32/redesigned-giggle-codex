@@ -189,7 +189,24 @@ export class AudioCapture {
           break;
 
         case 'status':
-          console.log('[AudioCapture] Server status:', message);
+          this.bridge.emit('feed-status', {
+            ...message.data,
+            tabId: message.data?.tabId || message.tabId || this.tabId
+          });
+          break;
+
+        case 'autopilot':
+          this.bridge.emit('autopilot-status', {
+            ...message.data,
+            tabId: message.data?.tabId || message.tabId || this.tabId
+          });
+          break;
+
+        case 'alert':
+          this.bridge.emit('feed-alert', {
+            ...message.data,
+            tabId: message.data?.tabId || message.tabId || this.tabId
+          });
           break;
 
         default:
