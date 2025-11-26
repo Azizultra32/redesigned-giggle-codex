@@ -7,8 +7,10 @@
 
 import { TranscriptView } from './ui/transcript';
 import { ControlButtons } from './ui/buttons';
-import { TabsComponent } from './ui/tabs';
+import { TabId, TabsComponent } from './ui/tabs';
 import { StatusPills } from './ui/pills';
+import { FeedBadges, FeedStatusInfo } from './ui/feed-badges';
+import { DebugLog, DebugLogEntry } from './ui/debug-log';
 import { Bridge } from './bridge';
 import { DOMMapper, PatientInfo } from './domMapper';
 
@@ -17,10 +19,14 @@ export interface OverlayState {
   isRecording: boolean;
   isConnected: boolean;
   isActive: boolean;
-  activeTab: 'transcript' | 'mapping' | 'settings';
+  activeTab: TabId;
   transcriptLines: TranscriptLine[];
   patientInfo: PatientInfo | null;
   warnings: string[];
+  feedStatuses: Record<string, FeedStatusInfo>;
+  autopilot: AutopilotState | null;
+  alerts: AlertEvent[];
+  eventLog: DebugLogEntry[];
 }
 
 export interface TranscriptLine {
@@ -30,6 +36,23 @@ export interface TranscriptLine {
   timestamp: number;
   isFinal: boolean;
   tabId?: string;
+}
+
+export interface AutopilotState {
+  ready: boolean;
+  coverage: number;
+  surfaces: number;
+  reason?: string;
+  timestamp?: string;
+}
+
+export interface AlertEvent {
+  feed: string;
+  severity: 'critical' | 'warning' | 'info';
+  message: string;
+  timestamp: string;
+  tabId?: string;
+  keywords?: string[];
 }
 
 export class FerrariOverlay {
@@ -45,6 +68,8 @@ export class FerrariOverlay {
   private controlButtons: ControlButtons;
   private tabs: TabsComponent;
   private statusPills: StatusPills;
+  private feedBadges: FeedBadges;
+  private debugLog: DebugLog;
 
   constructor(bridge: Bridge, domMapper: DOMMapper, tabId: string) {
     this.bridge = bridge;
@@ -64,6 +89,8 @@ export class FerrariOverlay {
     this.controlButtons = new ControlButtons(this.shadowRoot, this.handleControlAction.bind(this));
     this.tabs = new TabsComponent(this.shadowRoot, this.handleTabChange.bind(this));
     this.statusPills = new StatusPills(this.shadowRoot);
+    this.feedBadges = new FeedBadges(this.shadowRoot);
+    this.debugLog = new DebugLog(this.shadowRoot);
 
     this.setupEventListeners();
     this.render();
@@ -78,7 +105,11 @@ export class FerrariOverlay {
       activeTab: 'transcript',
       transcriptLines: [],
       patientInfo: null,
-      warnings: []
+      warnings: [],
+      feedStatuses: {},
+      autopilot: null,
+      alerts: [],
+      eventLog: []
     };
   }
 
@@ -108,6 +139,21 @@ export class FerrariOverlay {
       if (data.tabId && data.tabId !== this.tabId) return;
       const warning = data.message || 'Patient mismatch detected. Verify patient before recording.';
       this.setState({ warnings: Array.from(new Set([...this.state.warnings, warning])) });
+    });
+
+    this.bridge.on('feed-status', (data: FeedStatusInfo & { tabId?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.handleFeedStatus(data);
+    });
+
+    this.bridge.on('autopilot-status', (data: AutopilotState & { tabId?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.handleAutopilotState(data);
+    });
+
+    this.bridge.on('feed-alert', (data: AlertEvent & { tabId?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.handleAlert(data);
     });
 
     // Keyboard shortcut to toggle overlay
@@ -140,6 +186,50 @@ export class FerrariOverlay {
 
   private handleTabChange(tab: OverlayState['activeTab']): void {
     this.setState({ activeTab: tab });
+  }
+
+  private handleFeedStatus(status: FeedStatusInfo): void {
+    const updatedStatuses = { ...this.state.feedStatuses, [status.feed]: status };
+
+    this.addEventLogEntry({
+      id: `${status.feed}-${status.timestamp || Date.now()}`,
+      type: 'status',
+      message: `${status.label || 'Feed'} ${status.status}`,
+      detail: status.timestamp ? new Date(status.timestamp).toLocaleTimeString() : undefined,
+      timestamp: status.timestamp || new Date().toISOString(),
+      feed: status.feed
+    });
+
+    this.setState({ feedStatuses: updatedStatuses });
+    this.feedBadges.update(status);
+  }
+
+  private handleAutopilotState(state: AutopilotState): void {
+    this.addEventLogEntry({
+      id: `autopilot-${state.timestamp || Date.now()}`,
+      type: 'autopilot',
+      message: state.ready ? 'Autopilot ready' : 'Autopilot not ready',
+      detail: state.reason,
+      timestamp: state.timestamp || new Date().toISOString(),
+      feed: 'D'
+    });
+
+    this.setState({ autopilot: state });
+  }
+
+  private handleAlert(alert: AlertEvent): void {
+    const nextAlerts = [alert, ...this.state.alerts].slice(0, 5);
+
+    this.addEventLogEntry({
+      id: `alert-${alert.timestamp}-${alert.message}`,
+      type: 'alert',
+      message: `${alert.feed} ${alert.severity.toUpperCase()}: ${alert.message}`,
+      detail: alert.keywords?.join(', '),
+      timestamp: alert.timestamp || new Date().toISOString(),
+      feed: alert.feed
+    });
+
+    this.setState({ alerts: nextAlerts });
   }
 
   private async startRecording(): Promise<void> {
@@ -192,6 +282,11 @@ export class FerrariOverlay {
     this.container.style.display = this.state.isVisible ? 'block' : 'none';
   }
 
+  private addEventLogEntry(entry: DebugLogEntry): void {
+    const updated = [entry, ...this.state.eventLog].slice(0, 50);
+    this.setState({ eventLog: updated });
+  }
+
   private setState(partial: Partial<OverlayState>): void {
     this.state = { ...this.state, ...partial };
 
@@ -214,10 +309,13 @@ export class FerrariOverlay {
     this.statusPills.update({
       isConnected: this.state.isConnected,
       isRecording: this.state.isRecording,
-      patientInfo: this.state.patientInfo
+      patientInfo: this.state.patientInfo,
+      autopilot: this.state.autopilot
     });
 
     this.tabs.setActiveTab(this.state.activeTab);
+
+    this.debugLog.update(this.state.eventLog);
 
     this.updateBanner();
   }
@@ -259,6 +357,7 @@ export class FerrariOverlay {
           <button class="minimize-btn" title="Minimize (Alt+G)">−</button>
         </div>
       </div>
+      <div class="feed-badges-container" id="feed-badges"></div>
       <div class="overlay-banner hidden" id="overlay-banner"></div>
       <div class="overlay-tabs" id="tabs-container"></div>
       <div class="overlay-content">
@@ -269,6 +368,9 @@ export class FerrariOverlay {
         <div class="tab-panel hidden" id="settings-panel">
           <p>Settings and configuration</p>
         </div>
+        <div class="tab-panel hidden" id="debug-panel">
+          <div id="debug-log"></div>
+        </div>
       </div>
       <div class="overlay-footer" id="control-buttons"></div>
     `;
@@ -277,13 +379,17 @@ export class FerrariOverlay {
 
     // Mount components
     const pillsContainer = this.shadowRoot.getElementById('status-pills');
+    const feedBadgesContainer = this.shadowRoot.getElementById('feed-badges');
     const tabsContainer = this.shadowRoot.getElementById('tabs-container');
     const transcriptPanel = this.shadowRoot.getElementById('transcript-panel');
     const controlsContainer = this.shadowRoot.getElementById('control-buttons');
+    const debugLogContainer = this.shadowRoot.getElementById('debug-log');
 
     if (pillsContainer) this.statusPills.mount(pillsContainer);
+    if (feedBadgesContainer) this.feedBadges.mount(feedBadgesContainer);
     if (tabsContainer) this.tabs.mount(tabsContainer);
     if (transcriptPanel) this.transcriptView.mount(transcriptPanel);
+    if (debugLogContainer) this.debugLog.mount(debugLogContainer);
     if (controlsContainer) this.controlButtons.mount(controlsContainer);
 
     // Setup minimize button
@@ -306,6 +412,14 @@ export class FerrariOverlay {
 
     if (filteredWarnings.length > 0) {
       messages.push(...filteredWarnings);
+    }
+
+    if (this.state.alerts.length > 0) {
+      const alertMessages = this.state.alerts.slice(0, 2).map(alert => {
+        const prefix = alert.severity === 'critical' ? '🚨' : alert.severity === 'warning' ? '⚠️' : 'ℹ️';
+        return `${prefix} ${alert.message}`;
+      });
+      messages.push(...alertMessages);
     }
 
     if (messages.length === 0) {
@@ -385,6 +499,10 @@ export class FerrariOverlay {
         background: rgba(255, 255, 255, 0.3);
       }
 
+      .feed-badges-container {
+        border-bottom: 1px solid #2d2d44;
+      }
+
       .overlay-banner {
         background: #2d2d44;
         color: #ffcc80;
@@ -416,6 +534,11 @@ export class FerrariOverlay {
 
       .tab-panel.hidden {
         display: none;
+      }
+
+      #debug-panel {
+        padding: 12px 14px;
+        color: #e5e7eb;
       }
 
       .overlay-footer {

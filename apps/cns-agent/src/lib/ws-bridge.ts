@@ -19,6 +19,8 @@ import {
   AlertMessage,
   CommandMessage,
   CommandPayload,
+  AutopilotMessage,
+  AutopilotInfo,
   WsMessage
 } from '../types/index.js';
 
@@ -28,9 +30,12 @@ interface FeedState {
   status: FeedStatus;
 }
 
+interface AutopilotState extends AutopilotInfo {}
+
 export class WsBridge {
   private clients: Set<WebSocket> = new Set();
   private feedStates: Map<FeedId, FeedState> = new Map();
+  private autopilotStates: Map<string, AutopilotState> = new Map();
 
   constructor() {
     // Initialize feed states
@@ -39,6 +44,16 @@ export class WsBridge {
     this.feedStates.set('C', { feed: 'C', label: 'Emergency Monitor', status: 'ready' });
     this.feedStates.set('D', { feed: 'D', label: 'Patient Summary', status: 'connected' });
     this.feedStates.set('E', { feed: 'E', label: 'Compliance Audit', status: 'connected' });
+
+    // Default autopilot readiness (feed D)
+    this.autopilotStates.set('global', {
+      feed: 'D',
+      ready: false,
+      coverage: 0,
+      surfaces: 0,
+      reason: 'Awaiting patient context',
+      timestamp: new Date().toISOString()
+    });
 
     console.log('[WsBridge] Initialized with 5 feeds (A-E)');
   }
@@ -76,6 +91,14 @@ export class WsBridge {
       };
       this.sendToClient(ws, message);
     }
+
+    for (const autopilotState of this.autopilotStates.values()) {
+      const message: AutopilotMessage = {
+        type: 'autopilot',
+        data: { ...autopilotState, timestamp: new Date().toISOString() }
+      };
+      this.sendToClient(ws, message);
+    }
     console.log('[WsBridge] Client hydrated with all feed states');
   }
 
@@ -105,6 +128,24 @@ export class WsBridge {
 
     this.broadcast(message);
     console.log(`[WsBridge] Feed ${feedId} (${state.label}) status: ${status}`);
+  }
+
+  /**
+   * Update autopilot readiness (Feed D) and broadcast
+   */
+  updateAutopilotReadiness(state: AutopilotState): void {
+    const key = state.tabId || 'global';
+    this.autopilotStates.set(key, state);
+
+    const message: AutopilotMessage = {
+      type: 'autopilot',
+      data: state
+    };
+
+    this.broadcast(message);
+    console.log(
+      `[WsBridge] Autopilot readiness (${key}): ${state.ready ? 'ready' : 'not ready'} (${state.coverage}% coverage)`
+    );
   }
 
   /**

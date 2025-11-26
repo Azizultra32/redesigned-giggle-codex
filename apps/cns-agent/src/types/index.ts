@@ -60,6 +60,21 @@ export interface StatusMessage {
   data: FeedInfo;
 }
 
+export interface AutopilotInfo {
+  feed: Extract<FeedId, 'D'>;
+  ready: boolean;
+  coverage: number;
+  surfaces: number;
+  reason?: string;
+  tabId?: string;
+  timestamp: string;
+}
+
+export interface AutopilotMessage {
+  type: 'autopilot';
+  data: AutopilotInfo;
+}
+
 export interface TranscriptMessage {
   type: 'transcript';
   data: {
@@ -100,7 +115,12 @@ export interface CommandMessage {
   };
 }
 
-export type WsMessage = StatusMessage | TranscriptMessage | AlertMessage | CommandMessage;
+export type WsMessage =
+  | StatusMessage
+  | TranscriptMessage
+  | AlertMessage
+  | CommandMessage
+  | AutopilotMessage;
 
 // ============================================================================
 // Supabase Schema (transcripts2 table)

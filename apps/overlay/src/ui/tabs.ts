@@ -7,7 +7,7 @@
  * - Settings
  */
 
-export type TabId = 'transcript' | 'mapping' | 'settings';
+export type TabId = 'transcript' | 'mapping' | 'settings' | 'debug';
 
 interface Tab {
   id: TabId;
@@ -18,7 +18,8 @@ interface Tab {
 const TABS: Tab[] = [
   { id: 'transcript', label: 'Transcript', icon: '📝' },
   { id: 'mapping', label: 'Mapping', icon: '🎯' },
-  { id: 'settings', label: 'Settings', icon: '⚙️' }
+  { id: 'settings', label: 'Settings', icon: '⚙️' },
+  { id: 'debug', label: 'Debug', icon: '🛠️' }
 ];
 
 export class TabsComponent {
