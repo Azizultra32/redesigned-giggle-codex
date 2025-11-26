@@ -10,7 +10,7 @@
 import { FerrariOverlay } from './overlay';
 import { Bridge } from './bridge';
 import { AudioCapture } from './audio-capture';
-import { DOMMapper } from './domMapper';
+import { DOMMapper, DetectedField } from './domMapper';
 
 // Prevent multiple injections
 if ((window as any).__GHOST_NEXT_INJECTED__) {
@@ -96,6 +96,29 @@ function setupBridgeHandlers(
     }
   });
 
+  bridge.on('mcp-fill-sample', async (payload: { value?: string; requestId?: string; tabId?: string }) => {
+    if (payload?.tabId && payload.tabId !== localTabId) return;
+
+    const isEnabled = await isMcpAutomationEnabled();
+    if (!isEnabled) {
+      await bridge.emit('mcp-fill-result', {
+        success: false,
+        message: 'MCP automation flag is disabled in extension storage.',
+        requestId: payload?.requestId,
+        tabId: localTabId
+      });
+      return;
+    }
+
+    const result = handleMcpFill(domMapper, payload?.value);
+
+    await bridge.emit('mcp-fill-result', {
+      ...result,
+      requestId: payload?.requestId,
+      tabId: localTabId
+    });
+  });
+
   // Handle messages from background service worker
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[GHOST-NEXT] Received message from background:', message);
@@ -129,6 +152,59 @@ function setupBridgeHandlers(
 
     return true; // Keep channel open for async response
   });
+}
+
+function handleMcpFill(domMapper: DOMMapper, requestedValue?: string): {
+  success: boolean;
+  message: string;
+  targetField?: string;
+} {
+  try {
+    const fields = domMapper.detectFields();
+    const targetField = selectFillTarget(fields);
+
+    if (!targetField) {
+      return {
+        success: false,
+        message: 'No writable fields detected in the current DOM.'
+      };
+    }
+
+    const valueToApply = requestedValue || 'MCP sample fill: hello from AssistMD automation';
+    const success = domMapper.setFieldValue(targetField.id, valueToApply);
+
+    return {
+      success,
+      targetField: targetField.selector,
+      message: success
+        ? 'Applied sample MCP value to detected field.'
+        : 'Failed to write value into the detected field.'
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: `MCP fill request failed: ${String(error)}`
+    };
+  }
+}
+
+function isMcpAutomationEnabled(): Promise<boolean> {
+  return new Promise(resolve => {
+    chrome.storage.local.get(['mcpAutomationEnabled'], (result) => {
+      resolve(Boolean(result.mcpAutomationEnabled));
+    });
+  });
+}
+
+function selectFillTarget(fields: DetectedField[]): DetectedField | undefined {
+  const priorityOrder: DetectedField['type'][] = ['contenteditable', 'textarea', 'input', 'select'];
+
+  for (const type of priorityOrder) {
+    const target = fields.find(field => field.type === type);
+    if (target) return target;
+  }
+
+  return fields[0];
 }
 
 // Cleanup on page unload

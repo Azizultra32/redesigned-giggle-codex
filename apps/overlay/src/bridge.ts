@@ -23,7 +23,9 @@ export type BridgeEventType =
   | 'fields-changed'
   | 'get-patient-info'
   | 'server-error'
-  | 'toggle-overlay';
+  | 'toggle-overlay'
+  | 'mcp-fill-sample'
+  | 'mcp-fill-result';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 

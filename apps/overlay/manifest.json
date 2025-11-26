@@ -12,6 +12,15 @@
   "host_permissions": [
     "<all_urls>"
   ],
+  "optional_permissions": [
+    "debugger"
+  ],
+  "externally_connectable": {
+    "matches": [
+      "http://localhost:*",
+      "https://localhost:*"
+    ]
+  },
   "content_scripts": [
     {
       "matches": [

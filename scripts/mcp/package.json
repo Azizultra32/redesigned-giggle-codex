@@ -1,0 +1,13 @@
+{
+  "name": "assistmd-mcp-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "MCP automation helpers for AssistMD overlay development.",
+  "scripts": {
+    "sample-fill": "node sample-fill.js"
+  },
+  "dependencies": {
+    "chrome-remote-interface": "^0.33.0"
+  }
+}
