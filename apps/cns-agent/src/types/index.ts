@@ -52,6 +52,7 @@ export interface FeedInfo {
   label: string;
   status: FeedStatus;
   timestamp: string;
+  tabId?: string;
 }
 
 export interface StatusMessage {
@@ -67,6 +68,7 @@ export interface TranscriptMessage {
     isFinal: boolean;
     confidence: number;
     speaker: number;
+    tabId?: string;
     timestamp: string;
   };
 }
