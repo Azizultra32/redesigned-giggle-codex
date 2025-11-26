@@ -108,7 +108,7 @@ export class ControlButtons {
       }
 
       const isStartDisabled = !this.state.isConnected || !this.state.isActive;
-      const isStopDisabled = !this.state.isConnected;
+      const isStopDisabled = !this.state.isConnected || !this.state.isActive;
 
       (recordBtn as HTMLButtonElement).disabled = isStartDisabled;
       (stopBtn as HTMLButtonElement).disabled = isStopDisabled;

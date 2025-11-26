@@ -214,7 +214,8 @@ export class FerrariOverlay {
     this.statusPills.update({
       isConnected: this.state.isConnected,
       isRecording: this.state.isRecording,
-      patientInfo: this.state.patientInfo
+      patientInfo: this.state.patientInfo,
+      isActive: this.state.isActive
     });
 
     this.tabs.setActiveTab(this.state.activeTab);
@@ -228,6 +229,7 @@ export class FerrariOverlay {
       await this.bridge.emit('hello', {
         tabId: this.tabId,
         url: window.location.href,
+        title: document.title,
         patientHint
       });
 
