@@ -176,9 +176,18 @@ export class DOMMapper {
 
   /**
    * Lightweight accessor for patient hints without mutating state.
+   *
+   * Prefer using the singular form to align with backend payload contracts.
+   */
+  public getPatientHint(): PatientInfo | null {
+    return this.extractPatientInfo();
+  }
+
+  /**
+   * Deprecated: use getPatientHint instead.
    */
   public getPatientHints(): PatientInfo | null {
-    return this.extractPatientInfo();
+    return this.getPatientHint();
   }
 
   /**

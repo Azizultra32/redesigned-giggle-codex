@@ -172,13 +172,15 @@ const wss = new WebSocketServer({
 });
 
 // Session management
+type PatientHint = string | Record<string, unknown> | null;
+
 interface Session {
   ws: WebSocket;
   userId: string;
   tabId: string | null;
   url?: string;
-  patientHint?: string | null;
-  lastPatientHint?: string | null;
+  patientHint?: PatientHint;
+  lastPatientHint?: PatientHint;
   transcriptId: number | null;
   deepgram: DeepgramConsumer | null;
   pendingChunks: TranscriptChunk[];
@@ -296,16 +298,20 @@ async function handleCommand(session: Session, message: any): Promise<void> {
  * Handle hello handshake to register tab metadata
  */
 function handleHello(session: Session, message: any): void {
-  const { tabId, url, patientHint } = message;
+  const { tabId, url, patientHint, patientHints } = message;
 
   if (!tabId) {
     send(session.ws, { type: 'error', error: 'Missing tabId in hello payload' });
     return;
   }
 
+  if (patientHints !== undefined && patientHint === undefined) {
+    console.warn('[Server] Received deprecated "patientHints" field. Use "patientHint" instead.');
+  }
+
   session.tabId = tabId;
   session.url = url;
-  session.patientHint = patientHint ?? session.patientHint ?? null;
+  session.patientHint = patientHint ?? patientHints ?? session.patientHint ?? null;
 
   addSessionForUser(session);
 

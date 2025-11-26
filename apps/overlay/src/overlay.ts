@@ -223,16 +223,16 @@ export class FerrariOverlay {
   }
 
   public async sendHello(): Promise<void> {
-    const patientHints = this.domMapper.getPatientHints();
+    const patientHint = this.domMapper.getPatientHint();
     try {
       await this.bridge.emit('hello', {
         tabId: this.tabId,
         url: window.location.href,
-        patientHints
+        patientHint
       });
 
-      if (patientHints) {
-        this.setState({ patientInfo: patientHints });
+      if (patientHint) {
+        this.setState({ patientInfo: patientHint });
       }
     } catch (error) {
       console.error('[Ferrari] Failed to send hello message:', error);
