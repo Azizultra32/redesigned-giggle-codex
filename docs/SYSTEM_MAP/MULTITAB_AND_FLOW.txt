@@ -1,0 +1,200 @@
+================================================================================
+                  MULTI-TAB + PIPELINE SYSTEM MAP (RED PROTOTYPE)
+================================================================================
+
+                        HUMAN → BROWSER → AGENT → CLOUD → DB
+
+    ┌───────────────────────────────────────────────────────────────────────┐
+    │                               DOCTOR                                 │
+    │   🎤 Speaks into mic                                                 │
+    │   👁️ Views multiple EHR tabs (same or different patients)           │
+    │   🖱️ Clicks overlay buttons (Record / Map / Fill)                   │
+    └───────────────┬──────────────────────────────────────────────────────┘
+                    │
+                    │ WebRTC mic capture + clicks
+                    ▼
+    ┌───────────────────────────────────────────────────────────────────────┐
+    │                         CHROME EXTENSION                             │
+    │  Path: apps/overlay/                                                │
+    │                                                                     │
+    │  content.js  (per EHR tab)                                          │
+    │    • Injected into each EHR tab                                     │
+    │    • Opens WS to backend (/ws)                                      │
+    │    • Sends "hello" {tabId,url,title,patientHint}                    │
+    │    • Relays audio + DOM maps + commands                             │
+    │                                                                     │
+    │  overlay.js (Shadow DOM UI)                                         │
+    │    • Ferrari tabs: Summary | SOAP | Transcript | Tasks | Patient | Debug
+    │    • Recorder pill states: idle | connecting | recording | error   │
+    │    • Renders feeds A–E in real time                                │
+    │    • Smart Fill executor writes into the underlying EHR DOM         │
+    │                                                                     │
+    │  service worker                                                     │
+    │    • Background messaging + reconnect policies                      │
+    └───────────────┬──────────────────────────────────────────────────────┘
+                    │ WS + PCM (16k mono)                                 
+                    ▼
+    ┌───────────────────────────────────────────────────────────────────────┐
+    │                             CNS AGENT                                │
+    │  Path: apps/cns-agent/                                              │
+    │                                                                     │
+    │  server.ts                                                          │
+    │    • Express + WebSocket /ws                                        │
+    │    • Registers tabs + doctor sessions                               │
+    │    • Routes audio buffers to Deepgram                               │
+    │    • Broadcasts feeds A–E                                           │
+    │                                                                     │
+    │  broker (WS registry)                                               │
+    │    • clients[tabId]: {ws,url,title,patientHint,isActive}            │
+    │    • activeTabId = tab bound by bind_audio                          │
+    │    • Fan-out rules (see FEED ROUTING below)                         │
+    │                                                                     │
+    │  deepgram consumer                                                  │
+    │    • Streams PCM to Deepgram nova-2 (diarization)                   │
+    │    • Emits partial/final transcripts with speaker labels            │
+    │                                                                     │
+    │  chunk assembler                                                    │
+    │    • Groups words by speaker                                        │
+    │    • Flushes ~30s windows or on speaker change                      │
+    │                                                                     │
+    │  supabase client (online/offline)                                   │
+    │    • Writes public.transcripts2 rows                                │
+    │    • transcript_chunk JSONB[] accumulation                          │
+    └───────────────┬──────────────────────────────────────────────────────┘
+                    │ Deepgram WS                                        
+                    ▼
+    ┌───────────────────────────────────────────────────────────────────────┐
+    │                              DEEPGRAM                                │
+    │  • Receives PCM                                                     │
+    │  • Returns diarized transcripts (speaker, start/end, is_final)      │
+    └───────────────┬──────────────────────────────────────────────────────┘
+                    │ SQL via Supabase JS                                 
+                    ▼
+    ┌───────────────────────────────────────────────────────────────────────┐
+    │                               SUPABASE                               │
+    │  Table: public.transcripts2                                          │
+    │    id (bigint PK)                                                    │
+    │    user_id (uuid) – doctor                                           │
+    │    patient_code (text) – ephemeral                                   │
+    │    patient_uuid (uuid|null) – true identity later                    │
+    │    transcript_chunk (jsonb[]) – diarized chunks                      │
+    │    transcript (text) – flattened                                     │
+    │    ai_summary / ai_short_summary (jsonb) – future                    │
+    │    created_at / completed_at                                         │
+    └───────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                       MULTI-TAB EHR SAFETY (BROWSER SIDE)
+================================================================================
+
+    Each EHR tab runs content.js and announces itself:
+
+        { type: "hello", tabId, url, title, patientHint {name?, mrn?} }
+
+    Active audio binding:
+      • overlay on Tab N → ws.send({type:"bind_audio", tabId})
+      • backend sets activeTabId = tabId; all transcript events tagged with tabId
+      • overlay ignores transcript events where event.tabId !== thisTabId
+
+    Patient safety:
+      • If DOM hints differ between tabs (Patient A vs Patient B), backend should
+        start a new transcripts2 row or warn before reusing the same session.
+      • Multiple tabs for SAME patient allowed; only one tab carries the audio.
+
+================================================================================
+                        FEED ROUTING (BACKEND → OVERLAY)
+================================================================================
+
+    Feed A: Transcripts + recorder state
+      - record_started / record_stopped
+      - transcript {tabId,text,isFinal,speaker,chunk}
+      Broadcast: all tabs for that doctor (tabs ignore if tabId mismatch)
+
+    Feed B: Commands / fill plans
+      - map_result, fill_plan, undo_result
+      Broadcast: origin tab only
+
+    Feed C: Emergency / compliance
+      - emergency {phrase, level}
+      Broadcast: all tabs
+
+    Feed D: Autopilot readiness
+      - autopilot_status {ready, coverage%, surfaces}
+      Broadcast: all tabs
+
+    Feed E: Summaries
+      - summary_ready {ai_summary, short}
+      Broadcast: all tabs
+
+================================================================================
+                           RECORDING LIFECYCLE (HAPPY PATH)
+================================================================================
+
+    1) Overlay (active tab): click Record
+       → send {type:"bind_audio", tabId}
+       → send {type:"control", action:"start_record"}
+
+    2) Backend
+       → create transcripts2 row (patient_code, user_id)
+       → start Deepgram session
+       → notify feed A: record_started
+
+    3) Streaming loop
+       → PCM from content.js → Deepgram → transcript JSON
+       → chunk assembler emits ~30s blocks with speaker labels
+       → feed A broadcast (tagged with tabId)
+       → save transcript_chunk to transcripts2
+
+    4) Stop
+       → overlay sends {type:"control", action:"stop_record"}
+       → backend flushes assembler, updates completed_at
+       → feed A: record_stopped
+
+    5) Post-processing (future)
+       → Summaries (feed E), structured SOAP, compliance flags
+       → Smart Fill plans (feed B) for DOM injection
+
+================================================================================
+                          DOM MAP + SMART FILL (MVP LOOP)
+================================================================================
+
+    Map Page (manual trigger):
+      overlay → content.js:
+        {type:"command", action:"map_page"}
+      content.js scans DOM → fields[], patientHint
+      → sends to backend (persist optional) + echoes to overlay (Patient tab)
+
+    Smart Fill:
+      overlay requests fill_plan (backend) using transcript + fields
+      backend returns steps[] (selector, value, mode)
+      overlay executes via content.js into active tab DOM
+      undo sends revert steps if supported
+
+================================================================================
+                               PORT & ENV (CURRENT)
+================================================================================
+
+    Agent:    PORT=3001 (see .env, adjust if running at 8787 per legacy docs)
+    Supabase: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
+    Deepgram: DEEPGRAM_API_KEY
+
+================================================================================
+                                WHAT EXISTS TODAY
+================================================================================
+
+    Backend: Express + WS scaffold, Deepgram/Supabase wiring partial.
+    Overlay: Red prototype; connects to WS; UI/feeds/mapping largely stubbed.
+    Docs: ASSISTMD_TRUTH_PACKAGE.md, SYSTEM_MAP/*, diagrams, troubleshooting.
+
+================================================================================
+                                NEAR-TERM TARGETS
+================================================================================
+
+    • Finish Ferrari overlay tabs + recorder pill UX
+    • Wire real-time transcript rendering with speaker labels (Feed A)
+    • Implement multi-tab safety (hello + bind_audio enforcement)
+    • Persist transcript_chunk to transcripts2 end-to-end
+    • Deliver Map → Fill → Undo MVP loop
+    • Add summary feed (E) once transcript pipeline is solid
+
+================================================================================
