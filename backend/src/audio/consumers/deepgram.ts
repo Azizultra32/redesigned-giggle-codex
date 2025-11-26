@@ -26,6 +26,8 @@ export interface TranscriptResult {
 export interface DeepgramConsumerOptions {
   onTranscript: (transcript: TranscriptResult) => void;
   onError: (error: Error) => void;
+  onUtteranceEnd?: () => void;
+  onClose?: () => void;
 }
 
 export class DeepgramConsumer {
@@ -80,10 +82,12 @@ export class DeepgramConsumer {
 
       this.connection.on(LiveTranscriptionEvents.Close, () => {
         console.log('[Deepgram] Connection closed');
+        this.options.onClose?.();
       });
 
       this.connection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
         console.log('[Deepgram] Utterance end detected');
+        this.options.onUtteranceEnd?.();
       });
 
       // Timeout for connection

@@ -27,6 +27,18 @@ export interface TranscriptChunk {
   }>;
 }
 
+export interface TranscriptRun {
+  id: number;
+  user_id: string;
+  transcript: string | null;
+  transcript_chunk: TranscriptChunk[];
+  created_at: string;
+  completed_at: string | null;
+  patient_code: string | null;
+  patient_uuid: string | null;
+  ai_summary?: unknown;
+}
+
 function getClient(): SupabaseClient {
   if (supabase) return supabase;
 
@@ -36,12 +48,25 @@ function getClient(): SupabaseClient {
   if (!url || !key) {
     console.warn('[Supabase] Missing credentials, running in offline mode');
     // Return a mock client for development
+    const mockQuery: any = {
+      select: () => mockQuery,
+      eq: () => mockQuery,
+      order: () => mockQuery,
+      limit: () => mockQuery,
+      single: async () => ({ data: null, error: null })
+    };
+
     return {
       from: () => ({
-        insert: async () => ({ data: { id: Date.now() }, error: null }),
-        select: async () => ({ data: [], error: null }),
-        update: async () => ({ data: null, error: null }),
-        single: async () => ({ data: null, error: null })
+        insert: () => ({
+          select: () => ({
+            single: async () => ({ data: { id: Date.now() }, error: null })
+          })
+        }),
+        select: () => mockQuery,
+        update: () => ({
+          eq: () => ({ data: null, error: null })
+        })
       })
     } as unknown as SupabaseClient;
   }
@@ -117,7 +142,8 @@ export async function saveTranscriptChunks(
     .from('transcripts2')
     .update({
       transcript_chunk: updatedChunks,
-      transcript: fullTranscript
+      transcript: fullTranscript,
+      processed_at: new Date().toISOString()
     })
     .eq('id', transcriptId);
 
@@ -136,7 +162,8 @@ export async function updateTranscriptRun(transcriptId: number): Promise<void> {
   const { error } = await client
     .from('transcripts2')
     .update({
-      completed_at: new Date().toISOString()
+      completed_at: new Date().toISOString(),
+      processed_at: new Date().toISOString()
     })
     .eq('id', transcriptId);
 
@@ -188,6 +215,33 @@ export async function getFullTranscript(transcriptId: number): Promise<string> {
   }
 
   return data?.transcript || '';
+}
+
+/**
+ * Fetch a transcript run with chunks and metadata
+ */
+export async function getTranscriptRun(
+  transcriptId: number
+): Promise<TranscriptRun | null> {
+  const client = getClient();
+
+  const { data, error } = await client
+    .from('transcripts2')
+    .select(
+      'id, user_id, transcript, transcript_chunk, created_at, completed_at, patient_code, patient_uuid, ai_summary'
+    )
+    .eq('id', transcriptId)
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') {
+      return null;
+    }
+    console.error('[Supabase] Failed to fetch transcript run:', error);
+    throw error;
+  }
+
+  return data as TranscriptRun;
 }
 
 /**
