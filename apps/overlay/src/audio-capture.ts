@@ -165,16 +165,24 @@ export class AudioCapture {
       const message = JSON.parse(data);
 
       switch (message.type) {
-        case 'transcript':
+        case 'transcript': {
+          const feed = message.data?.feed || message.feed;
+          if (feed && feed !== 'A') return;
+
+          const messageTabId = message.data?.tabId || message.tabId || message.tab_id;
+          if (messageTabId && messageTabId !== this.tabId) return;
+
           this.bridge.emit('transcript', {
-            id: message.id || `${Date.now()}`,
-            speaker: message.speaker || 'Unknown',
-            text: message.text,
-            timestamp: message.timestamp || Date.now(),
-            isFinal: message.is_final ?? true,
-            tabId: message.tabId || message.tab_id || this.tabId
+            id: message.data?.timestamp || message.timestamp || `${Date.now()}`,
+            speaker: (message.data?.speaker ?? message.speaker ?? 'Unknown').toString(),
+            text: message.data?.text ?? message.text,
+            timestamp: message.data?.timestamp ? Date.parse(message.data.timestamp) : message.timestamp || Date.now(),
+            isFinal: message.data?.isFinal ?? message.is_final ?? true,
+            tabId: messageTabId || this.tabId,
+            feed
           });
           break;
+        }
 
         case 'patient_mismatch':
           this.bridge.emit('patient-mismatch', {
@@ -183,10 +191,12 @@ export class AudioCapture {
           });
           break;
 
-        case 'error':
-          console.error('[AudioCapture] Server error:', message.error);
-          this.bridge.emit('server-error', { error: message.error, tabId: this.tabId });
+        case 'error': {
+          const errorMessage = message.error || message.data?.error || 'Unknown error';
+          console.error('[AudioCapture] Server error:', errorMessage);
+          this.bridge.emit('server-error', { error: errorMessage, tabId: message.tabId || this.tabId });
           break;
+        }
 
         case 'status':
           console.log('[AudioCapture] Server status:', message);

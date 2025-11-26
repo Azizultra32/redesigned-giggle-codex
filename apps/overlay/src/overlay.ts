@@ -29,6 +29,8 @@ export interface TranscriptLine {
   text: string;
   timestamp: number;
   isFinal: boolean;
+  feed?: string;
+  status?: 'interim' | 'final';
   tabId?: string;
 }
 
@@ -45,6 +47,8 @@ export class FerrariOverlay {
   private controlButtons: ControlButtons;
   private tabs: TabsComponent;
   private statusPills: StatusPills;
+  private utteranceBuffers: Map<string, { id: string; createdAt: number; timeout?: ReturnType<typeof setTimeout> }>; 
+  private bufferWindowMs = 32000; // Allow for ChunkAssembler window (~30s) before auto-finalizing
 
   constructor(bridge: Bridge, domMapper: DOMMapper, tabId: string) {
     this.bridge = bridge;
@@ -64,6 +68,7 @@ export class FerrariOverlay {
     this.controlButtons = new ControlButtons(this.shadowRoot, this.handleControlAction.bind(this));
     this.tabs = new TabsComponent(this.shadowRoot, this.handleTabChange.bind(this));
     this.statusPills = new StatusPills(this.shadowRoot);
+    this.utteranceBuffers = new Map();
 
     this.setupEventListeners();
     this.render();
@@ -84,9 +89,10 @@ export class FerrariOverlay {
 
   private setupEventListeners(): void {
     // Listen for bridge events
-    this.bridge.on('transcript', (data: TranscriptLine & { tabId?: string }) => {
+    this.bridge.on('transcript', (data: TranscriptLine & { tabId?: string; feed?: string }) => {
       if (data.tabId && data.tabId !== this.tabId) return;
-      this.addTranscriptLine(data);
+      if (data.feed && data.feed !== 'A') return;
+      this.handleTranscriptEvent(data);
     });
 
     this.bridge.on('connection', (status: { connected: boolean; tabId?: string }) => {
@@ -107,6 +113,12 @@ export class FerrariOverlay {
     this.bridge.on('patient-mismatch', (data: { tabId?: string; message?: string }) => {
       if (data.tabId && data.tabId !== this.tabId) return;
       const warning = data.message || 'Patient mismatch detected. Verify patient before recording.';
+      this.setState({ warnings: Array.from(new Set([...this.state.warnings, warning])) });
+    });
+
+    this.bridge.on('server-error', (data: { tabId?: string; error?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      const warning = data.error || 'Unexpected server error from Deepgram feed.';
       this.setState({ warnings: Array.from(new Set([...this.state.warnings, warning])) });
     });
 
@@ -185,6 +197,56 @@ export class FerrariOverlay {
 
     this.setState({ transcriptLines: lines });
     this.transcriptView.updateLines(lines);
+  }
+
+  private handleTranscriptEvent(line: TranscriptLine): void {
+    const timestamp = line.timestamp || Date.now();
+    const speakerKey = line.speaker || 'unknown';
+    const buffer = this.utteranceBuffers.get(speakerKey);
+
+    if (line.isFinal) {
+      const activeBuffer = buffer && (timestamp - buffer.createdAt) <= this.bufferWindowMs ? buffer : null;
+      if (activeBuffer?.timeout) {
+        clearTimeout(activeBuffer.timeout);
+      }
+
+      this.utteranceBuffers.delete(speakerKey);
+      this.addTranscriptLine({
+        ...line,
+        id: activeBuffer?.id || line.id || `${timestamp}`,
+        timestamp,
+        status: 'final'
+      });
+      return;
+    }
+
+    const targetBuffer = buffer && (timestamp - buffer.createdAt) <= this.bufferWindowMs
+      ? buffer
+      : { id: `utterance-${timestamp}-${Math.random().toString(16).slice(2)}`, createdAt: timestamp };
+
+    if (targetBuffer.timeout) {
+      clearTimeout(targetBuffer.timeout);
+    }
+
+    targetBuffer.timeout = setTimeout(() => {
+      this.addTranscriptLine({
+        ...line,
+        id: targetBuffer.id,
+        timestamp,
+        isFinal: true,
+        status: 'final'
+      });
+      this.utteranceBuffers.delete(speakerKey);
+    }, this.bufferWindowMs);
+
+    this.utteranceBuffers.set(speakerKey, targetBuffer);
+
+    this.addTranscriptLine({
+      ...line,
+      id: targetBuffer.id,
+      timestamp,
+      status: 'interim'
+    });
   }
 
   private toggleVisibility(): void {
