@@ -51,6 +51,8 @@ export class AudioCapture {
     console.log('[AudioCapture] Starting audio capture...');
 
     try {
+      this.bridge.emit('audio-status', { recording: false, state: 'connecting', tabId: this.tabId });
+
       // Request microphone access
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -74,12 +76,13 @@ export class AudioCapture {
       await this.setupAudioPipeline();
 
       this._isRecording = true;
-      this.bridge.emit('audio-status', { recording: true });
+      this.bridge.emit('audio-status', { recording: true, state: 'listening', tabId: this.tabId });
 
       console.log('[AudioCapture] Audio capture started successfully');
     } catch (error) {
       console.error('[AudioCapture] Failed to start:', error);
       await this.cleanup();
+      this.bridge.emit('audio-status', { recording: false, state: 'error', tabId: this.tabId, error: String(error) });
       throw error;
     }
   }
@@ -95,7 +98,7 @@ export class AudioCapture {
     await this.cleanup();
 
     this._isRecording = false;
-    this.bridge.emit('audio-status', { recording: false });
+    this.bridge.emit('audio-status', { recording: false, state: 'idle', tabId: this.tabId });
 
     console.log('[AudioCapture] Audio capture stopped');
   }
@@ -114,17 +117,20 @@ export class AudioCapture {
         console.log('[AudioCapture] WebSocket connected');
         this.reconnectAttempts = 0;
         this.bridge.emit('connection', { connected: true, tabId: this.tabId });
+        this.bridge.emit('audio-status', { recording: this._isRecording, state: 'connecting', tabId: this.tabId });
         resolve();
       };
 
       this.websocket.onerror = (error) => {
         console.error('[AudioCapture] WebSocket error:', error);
+        this.bridge.emit('audio-status', { recording: this._isRecording, state: 'error', tabId: this.tabId, error: 'WebSocket error' });
         reject(new Error('WebSocket connection failed'));
       };
 
       this.websocket.onclose = (event) => {
         console.log('[AudioCapture] WebSocket closed:', event.code, event.reason);
         this.bridge.emit('connection', { connected: false, tabId: this.tabId });
+        this.bridge.emit('audio-status', { recording: false, state: this._isRecording ? 'error' : 'idle', tabId: this.tabId });
 
         // Attempt reconnection if still recording
         if (this._isRecording && this.reconnectAttempts < this.maxReconnectAttempts) {

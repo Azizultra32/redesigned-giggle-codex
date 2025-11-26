@@ -9,48 +9,35 @@ import { TranscriptView } from './ui/transcript';
 import { ControlButtons } from './ui/buttons';
 import { TabsComponent } from './ui/tabs';
 import { StatusPills } from './ui/pills';
+import { RecorderPill } from './ui/recorder-pill';
+import { PatientCard } from './ui/patient-card';
 import { Bridge } from './bridge';
-import { DOMMapper, PatientInfo } from './domMapper';
-
-export interface OverlayState {
-  isVisible: boolean;
-  isRecording: boolean;
-  isConnected: boolean;
-  isActive: boolean;
-  activeTab: 'transcript' | 'mapping' | 'settings';
-  transcriptLines: TranscriptLine[];
-  patientInfo: PatientInfo | null;
-  warnings: string[];
-}
-
-export interface TranscriptLine {
-  id: string;
-  speaker: string;
-  text: string;
-  timestamp: number;
-  isFinal: boolean;
-  tabId?: string;
-}
+import { DOMMapper } from './domMapper';
+import { OverlayStore, OverlayState } from './state';
+import { PatientInfo, RecorderState, TabId, TranscriptLine } from './types';
 
 export class FerrariOverlay {
   private shadowRoot: ShadowRoot;
   private container: HTMLElement;
-  private state: OverlayState;
   private bridge: Bridge;
   private domMapper: DOMMapper;
   private tabId: string;
+  private store: OverlayStore;
 
   // UI Components
   private transcriptView: TranscriptView;
   private controlButtons: ControlButtons;
   private tabs: TabsComponent;
   private statusPills: StatusPills;
+  private recorderPill: RecorderPill;
+  private summaryPatientCard: PatientCard;
+  private patientCard: PatientCard;
 
   constructor(bridge: Bridge, domMapper: DOMMapper, tabId: string) {
     this.bridge = bridge;
     this.domMapper = domMapper;
     this.tabId = tabId;
-    this.state = this.getInitialState();
+    this.store = new OverlayStore();
 
     // Create host element
     this.container = document.createElement('div');
@@ -64,50 +51,89 @@ export class FerrariOverlay {
     this.controlButtons = new ControlButtons(this.shadowRoot, this.handleControlAction.bind(this));
     this.tabs = new TabsComponent(this.shadowRoot, this.handleTabChange.bind(this));
     this.statusPills = new StatusPills(this.shadowRoot);
+    this.recorderPill = new RecorderPill(this.shadowRoot);
+    this.summaryPatientCard = new PatientCard(this.shadowRoot);
+    this.patientCard = new PatientCard(this.shadowRoot);
 
     this.setupEventListeners();
     this.render();
-  }
 
-  private getInitialState(): OverlayState {
-    return {
-      isVisible: true,
-      isRecording: false,
-      isConnected: false,
-      isActive: true,
-      activeTab: 'transcript',
-      transcriptLines: [],
-      patientInfo: null,
-      warnings: []
-    };
+    this.store.subscribe((state) => this.updateUI(state));
   }
 
   private setupEventListeners(): void {
     // Listen for bridge events
     this.bridge.on('transcript', (data: TranscriptLine & { tabId?: string }) => {
       if (data.tabId && data.tabId !== this.tabId) return;
-      this.addTranscriptLine(data);
+      this.store.addTranscriptLine(data);
     });
 
     this.bridge.on('connection', (status: { connected: boolean; tabId?: string }) => {
       if (status.tabId && status.tabId !== this.tabId) return;
-      this.setState({ isConnected: status.connected });
+      this.store.setConnection(status.connected);
     });
 
-    this.bridge.on('patient', (info: PatientInfo & { tabId?: string }) => {
+    this.bridge.on('patient', (info: Partial<PatientInfo> & { tabId?: string }) => {
       if (info.tabId && info.tabId !== this.tabId) return;
-      this.setState({ patientInfo: info });
+      const { tabId: _ignored, ...patient } = info;
+      if (patient.name || patient.mrn || patient.patient_code || patient.patient_uuid) {
+        const normalized: PatientInfo = {
+          name: patient.name || 'Unknown',
+          mrn: patient.mrn || '',
+          dob: patient.dob,
+          patient_code: patient.patient_code,
+          patient_uuid: patient.patient_uuid
+        };
+        this.store.setPatientInfo(normalized);
+      } else {
+        this.store.setPatientInfo(null);
+      }
     });
 
     this.bridge.on('active_tab_changed', (data: { tabId?: string; isActive: boolean }) => {
       if (data.tabId && data.tabId !== this.tabId) return;
-      this.setState({ isActive: data.isActive });
+      this.store.setActiveState(data.isActive);
+      if (data.isActive) {
+        this.store.resetWarnings();
+      } else {
+        this.store.addWarning('This tab is inactive. Recording controls are disabled.');
+      }
     });
 
     this.bridge.on('patient-mismatch', (data: { tabId?: string; message?: string }) => {
       if (data.tabId && data.tabId !== this.tabId) return;
       const warning = data.message || 'Patient mismatch detected. Verify patient before recording.';
-      this.setState({ warnings: Array.from(new Set([...this.state.warnings, warning])) });
+      this.store.addWarning(warning);
+    });
+
+    this.bridge.on('recording-started', (data: { tabId?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.store.setRecorderState('listening');
+    });
+
+    this.bridge.on('recording-stopped', (data: { tabId?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.store.setRecorderState('idle');
+    });
+
+    this.bridge.on('recording-error', (data: { tabId?: string; error?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.store.setRecorderState('error', 'error', data.error || 'Recorder error');
+    });
+
+    this.bridge.on('audio-status', (payload: { recording?: boolean; state?: RecorderState; tabId?: string; error?: string }) => {
+      if (payload.tabId && payload.tabId !== this.tabId) return;
+      const recorderState: RecorderState = payload.state || (payload.recording ? 'listening' : 'idle');
+      this.store.setRecorderState(recorderState, payload.error ? 'error' : 'info', payload.error);
+    });
+
+    this.bridge.on('server-error', (data: { tabId?: string; error?: string }) => {
+      if (data.tabId && data.tabId !== this.tabId) return;
+      this.store.addWarning(data.error || 'Server error');
+    });
+
+    this.bridge.on('toggle-overlay', () => {
+      this.toggleVisibility();
     });
 
     // Keyboard shortcut to toggle overlay
@@ -138,88 +164,44 @@ export class FerrariOverlay {
     }
   }
 
-  private handleTabChange(tab: OverlayState['activeTab']): void {
-    this.setState({ activeTab: tab });
+  private handleTabChange(tab: TabId): void {
+    this.store.setActiveTab(tab);
   }
 
   private async startRecording(): Promise<void> {
-    if (!this.state.isActive) {
-      this.setState({
-        warnings: Array.from(new Set([...this.state.warnings, 'Activate this tab to start recording.']))
-      });
+    const state = this.store.getState();
+    if (!state.isActive) {
+      this.store.addWarning('Activate this tab to start recording.');
       return;
     }
 
     try {
+      this.store.setRecorderState('connecting');
       await this.bridge.emit('start-recording', { tabId: this.tabId });
-      this.setState({ isRecording: true });
     } catch (error) {
       console.error('[Ferrari] Failed to start recording:', error);
+      this.store.setRecorderState('error', 'error', 'Failed to start recording');
     }
   }
 
   private async stopRecording(): Promise<void> {
     try {
       await this.bridge.emit('stop-recording', { tabId: this.tabId });
-      this.setState({ isRecording: false });
+      this.store.setRecorderState('idle');
     } catch (error) {
       console.error('[Ferrari] Failed to stop recording:', error);
+      this.store.setRecorderState('error', 'error', 'Failed to stop recording');
     }
   }
 
   private clearTranscript(): void {
-    this.setState({ transcriptLines: [] });
+    this.store.clearTranscript();
     this.transcriptView.clear();
   }
 
-  private addTranscriptLine(line: TranscriptLine): void {
-    const lines = [...this.state.transcriptLines];
-
-    // Update existing line if not final, or add new
-    const existingIndex = lines.findIndex(l => l.id === line.id);
-    if (existingIndex >= 0) {
-      lines[existingIndex] = line;
-    } else {
-      lines.push(line);
-    }
-
-    this.setState({ transcriptLines: lines });
-    this.transcriptView.updateLines(lines);
-  }
-
   private toggleVisibility(): void {
-    this.setState({ isVisible: !this.state.isVisible });
-    this.container.style.display = this.state.isVisible ? 'block' : 'none';
-  }
-
-  private setState(partial: Partial<OverlayState>): void {
-    this.state = { ...this.state, ...partial };
-
-    if (partial.isActive) {
-      this.state.warnings = this.state.warnings.filter(
-        warning => warning !== 'Activate this tab to start recording.'
-      );
-    }
-
-    this.updateUI();
-  }
-
-  private updateUI(): void {
-    this.controlButtons.update({
-      isRecording: this.state.isRecording,
-      isConnected: this.state.isConnected,
-      isActive: this.state.isActive
-    });
-
-    this.statusPills.update({
-      isConnected: this.state.isConnected,
-      isRecording: this.state.isRecording,
-      patientInfo: this.state.patientInfo
-    });
-
-    this.tabs.setActiveTab(this.state.activeTab);
-
-    this.updateBanner();
+    const state = this.store.getState();
+    this.store.setVisibility(!state.isVisible);
   }
 
   public async sendHello(): Promise<void> {
@@ -232,7 +214,7 @@ export class FerrariOverlay {
       });
 
       if (patientHint) {
-        this.setState({ patientInfo: patientHint });
+        this.store.setPatientInfo(patientHint);
       }
     } catch (error) {
       console.error('[Ferrari] Failed to send hello message:', error);
@@ -254,6 +236,7 @@ export class FerrariOverlay {
           <span class="logo">🏎️</span>
           <span>GHOST-NEXT</span>
         </div>
+        <div class="recorder-slot" id="recorder-pill"></div>
         <div class="header-pills" id="status-pills"></div>
         <div class="header-controls">
           <button class="minimize-btn" title="Minimize (Alt+G)">−</button>
@@ -262,12 +245,40 @@ export class FerrariOverlay {
       <div class="overlay-banner hidden" id="overlay-banner"></div>
       <div class="overlay-tabs" id="tabs-container"></div>
       <div class="overlay-content">
-        <div class="tab-panel" id="transcript-panel"></div>
-        <div class="tab-panel hidden" id="mapping-panel">
-          <p>DOM field mapping controls</p>
+        <div class="tab-panel" id="summary-panel">
+          <div class="panel-grid">
+            <div id="summary-card"></div>
+            <div class="panel-box">
+              <div class="panel-title">Quick Notes</div>
+              <p class="panel-placeholder">Summaries and SOAP snippets will appear here.</p>
+            </div>
+          </div>
         </div>
-        <div class="tab-panel hidden" id="settings-panel">
-          <p>Settings and configuration</p>
+        <div class="tab-panel hidden" id="soap-panel">
+          <div class="panel-box">
+            <div class="panel-title">SOAP Outline</div>
+            <p class="panel-placeholder">Structure Subjective, Objective, Assessment, Plan outputs.</p>
+          </div>
+        </div>
+        <div class="tab-panel hidden" id="transcript-panel"></div>
+        <div class="tab-panel hidden" id="tasks-panel">
+          <div class="panel-box">
+            <div class="panel-title">Tasks</div>
+            <ul class="panel-list">
+              <li>Track follow-ups</li>
+              <li>Mark actions as completed</li>
+              <li>Review agent reminders</li>
+            </ul>
+          </div>
+        </div>
+        <div class="tab-panel hidden" id="patient-panel">
+          <div id="patient-card"></div>
+        </div>
+        <div class="tab-panel hidden" id="debug-panel">
+          <div class="panel-box">
+            <div class="panel-title">Status Log</div>
+            <div class="debug-log" id="debug-log"></div>
+          </div>
         </div>
       </div>
       <div class="overlay-footer" id="control-buttons"></div>
@@ -278,11 +289,17 @@ export class FerrariOverlay {
     // Mount components
     const pillsContainer = this.shadowRoot.getElementById('status-pills');
     const tabsContainer = this.shadowRoot.getElementById('tabs-container');
+    const recorderContainer = this.shadowRoot.getElementById('recorder-pill');
+    const summaryCardContainer = this.shadowRoot.getElementById('summary-card');
+    const patientCardContainer = this.shadowRoot.getElementById('patient-card');
     const transcriptPanel = this.shadowRoot.getElementById('transcript-panel');
     const controlsContainer = this.shadowRoot.getElementById('control-buttons');
 
     if (pillsContainer) this.statusPills.mount(pillsContainer);
     if (tabsContainer) this.tabs.mount(tabsContainer);
+    if (recorderContainer) this.recorderPill.mount(recorderContainer);
+    if (summaryCardContainer) this.summaryPatientCard.mount(summaryCardContainer);
+    if (patientCardContainer) this.patientCard.mount(patientCardContainer);
     if (transcriptPanel) this.transcriptView.mount(transcriptPanel);
     if (controlsContainer) this.controlButtons.mount(controlsContainer);
 
@@ -291,18 +308,55 @@ export class FerrariOverlay {
     minimizeBtn?.addEventListener('click', () => this.toggleVisibility());
   }
 
-  private updateBanner(): void {
+  private updateUI(state: OverlayState): void {
+    this.container.style.display = state.isVisible ? 'block' : 'none';
+
+    this.controlButtons.update({
+      isRecording: state.isRecording,
+      isConnected: state.isConnected,
+      isActive: state.isActive
+    });
+
+    this.statusPills.update({
+      isConnected: state.isConnected,
+      isRecording: state.isRecording,
+      patientInfo: state.patientInfo
+    });
+
+    this.recorderPill.update({
+      state: state.recorderState,
+      message: state.warnings[state.warnings.length - 1]
+    });
+
+    this.tabs.setActiveTab(state.activeTab);
+    this.updateBanner(state);
+    this.renderDebugLog(state);
+
+    const scopedLines = state.transcriptLines.filter(line => !line.tabId || line.tabId === this.tabId);
+    this.transcriptView.updateLines(scopedLines);
+
+    const patientProps = {
+      patient: state.patientInfo,
+      feeds: Object.values(state.feeds),
+      statusLog: state.statusLog
+    };
+
+    this.summaryPatientCard.update(patientProps);
+    this.patientCard.update(patientProps);
+  }
+
+  private updateBanner(state: OverlayState): void {
     const banner = this.shadowRoot.getElementById('overlay-banner');
     if (!banner) return;
 
     const messages: string[] = [];
-    if (!this.state.isActive) {
+    if (!state.isActive) {
       messages.push('This tab is inactive. Recording controls are disabled.');
     }
 
-    const filteredWarnings = this.state.isActive
-      ? this.state.warnings.filter(warning => warning !== 'Activate this tab to start recording.')
-      : this.state.warnings;
+    const filteredWarnings = state.isActive
+      ? state.warnings.filter(warning => warning !== 'Activate this tab to start recording.')
+      : state.warnings;
 
     if (filteredWarnings.length > 0) {
       messages.push(...filteredWarnings);
@@ -318,6 +372,22 @@ export class FerrariOverlay {
     banner.classList.remove('hidden');
   }
 
+  private renderDebugLog(state: OverlayState): void {
+    const container = this.shadowRoot.getElementById('debug-log');
+    if (!container) return;
+
+    container.innerHTML = '';
+    state.statusLog.slice(-20).reverse().forEach(entry => {
+      const row = document.createElement('div');
+      row.className = `log-row tone-${entry.tone}`;
+      row.innerHTML = `
+        <span class="log-time">${new Date(entry.timestamp).toLocaleTimeString('en-US', { hour12: false })}</span>
+        <span class="log-message">${entry.message}</span>
+      `;
+      container.appendChild(row);
+    });
+  }
+
   private getStyles(): string {
     return `
       :host {
@@ -329,8 +399,8 @@ export class FerrariOverlay {
         position: fixed;
         top: 20px;
         right: 20px;
-        width: 380px;
-        max-height: 600px;
+        width: 420px;
+        max-height: 640px;
         background: #1a1a2e;
         border-radius: 12px;
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
@@ -342,7 +412,8 @@ export class FerrariOverlay {
       }
 
       .overlay-header {
-        display: flex;
+        display: grid;
+        grid-template-columns: auto 1fr auto auto;
         align-items: center;
         padding: 12px 16px;
         background: linear-gradient(135deg, #e63946 0%, #c62828 100%);
@@ -362,8 +433,12 @@ export class FerrariOverlay {
         font-size: 18px;
       }
 
+      .recorder-slot {
+        display: flex;
+        justify-content: center;
+      }
+
       .header-pills {
-        flex: 1;
         display: flex;
         gap: 6px;
         justify-content: flex-end;
@@ -424,6 +499,78 @@ export class FerrariOverlay {
         border-top: 1px solid #2d2d44;
       }
 
+      .panel-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .panel-box {
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 10px;
+        padding: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .panel-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #f2f3f7;
+        margin-bottom: 6px;
+      }
+
+      .panel-placeholder {
+        color: #9ea1ad;
+        font-size: 12px;
+        margin: 0;
+      }
+
+      .panel-list {
+        margin: 0;
+        padding-left: 18px;
+        color: #cfd1da;
+        font-size: 13px;
+      }
+
+      .debug-log {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 260px;
+        overflow-y: auto;
+      }
+
+      .log-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: #cdd0db;
+        padding: 6px 8px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .log-row.tone-warning {
+        border-color: rgba(255, 193, 7, 0.4);
+      }
+
+      .log-row.tone-error {
+        border-color: rgba(244, 67, 54, 0.5);
+      }
+
+      .log-time {
+        font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+        font-size: 11px;
+        color: #a0a3af;
+        min-width: 54px;
+      }
+
+      .log-message {
+        flex: 1;
+      }
+
       /* Scrollbar styling */
       ::-webkit-scrollbar {
         width: 6px;
@@ -441,6 +588,12 @@ export class FerrariOverlay {
       ::-webkit-scrollbar-thumb:hover {
         background: #4d4d6c;
       }
+
+      @media (min-width: 480px) {
+        .panel-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
     `;
   }
 
@@ -450,9 +603,5 @@ export class FerrariOverlay {
 
   public unmount(): void {
     this.container.remove();
-  }
-
-  public getState(): OverlayState {
-    return { ...this.state };
   }
 }

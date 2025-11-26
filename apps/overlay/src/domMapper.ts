@@ -7,6 +7,7 @@
  */
 
 import { Bridge } from './bridge';
+import { PatientInfo } from './types';
 
 export interface DetectedField {
   id: string;
@@ -32,12 +33,6 @@ export type FieldCategory =
   | 'vitals'
   | 'notes'
   | 'other';
-
-export interface PatientInfo {
-  name: string;
-  mrn: string;
-  dob?: string;
-}
 
 // Common field label patterns for healthcare forms
 const FIELD_PATTERNS: Record<FieldCategory, RegExp[]> = {
