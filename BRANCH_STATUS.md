@@ -4,7 +4,26 @@ This document provides a comprehensive overview of all open pull requests, their
 
 ## Overview
 
+**Total Open PRs: 14** (excluding this PR)
+
 All open PRs have **merge conflicts** with main (`mergeable_state: "dirty"`) and require review feedback to be addressed before merging.
+
+### Complete PR List
+
+| PR # | Title | Branch | Status |
+|------|-------|--------|--------|
+| #3 | Add tab-aware session handling for CNS agent | `codex/extend-session-handling-and-audio-control` | Open |
+| #4 | Add multi-tab overlay binding support | `codex/update-overlay-tabs-and-websocket-wiring` | Open |
+| #9 | Add transcript endpoints and offline Supabase handling | `codex/finish-deepgram-consumer-and-add-rest-route` | Open |
+| #11 | Add feed status UI and autopilot readiness events | `codex/add-overlay-ui-for-feed-status-and-events` | Open |
+| #13 | Add DOM map WebSocket flow with patient binding UI | `codex/add-dom-mapper-and-patient-hint-flow` | Open |
+| #15 | Add overlay state store with recorder and patient UI updates | `codex/create-tab-components-and-integrate-state-management` | Open |
+| #19 | Connect overlay to feed A transcript stream | `codex/connect-overlay-ws-client-to-feed-a` | Open |
+| #20 | Add transcript batching and retrieval endpoint | `codex/finalize-deepgram-consumer-handlers` | Open |
+| #21 | Add DOM mapping snapshot and smart fill executor | `codex/implement-dom-mapper-and-smart-fill-executor` | Open |
+| #22 | Add feed status diagnostics and autopilot readiness UI | `codex/emit-feed-status-events-and-render-ui` | Open |
+| #23 | Add MCP Smart Fill plan execution and safety interlocks | `codex/implement-mcp-script-hooks-for-tab-flows` | Open |
+| #24 | Add tab-aware websocket binding and overlay filtering | `codex/add-tab-registry-and-audio-binding` | Open |
 
 ---
 
@@ -165,12 +184,27 @@ All XSS vulnerabilities must be fixed before merging any PR:
 3. Create a shared utility function for consistent sanitization across components
 
 ### Merge Order Recommendation
-1. **PR #3** - Multi-tab support (foundation for other features)
-2. **PR #9** - Offline Supabase (backend infrastructure)
-3. **PR #11** - Feed status events (backend to frontend flow)
-4. **PR #4** - Multi-panel overlay layout (UI structure)
-5. **PR #13** - DOM map flow (requires #3, #4)
-6. **PR #15** - State store (can consolidate with #4 if overlapping)
+Based on dependencies and feature groupings, merge in this order:
+
+**Phase 1: Backend Foundation**
+1. **PR #3** - Tab-aware session handling (foundation for multi-tab support)
+2. **PR #9** - Transcript endpoints and offline Supabase (backend infrastructure)
+3. **PR #20** - Transcript batching and retrieval (builds on #9)
+
+**Phase 2: Feed and Status**  
+4. **PR #11** - Feed status UI and autopilot events (backend to frontend)
+5. **PR #22** - Feed status diagnostics and autopilot readiness UI (builds on #11)
+6. **PR #24** - Tab-aware websocket binding (requires #3)
+
+**Phase 3: Overlay UI**
+7. **PR #4** - Multi-tab overlay binding support (UI structure)
+8. **PR #15** - Overlay state store with recorder/patient UI (state management)
+9. **PR #19** - Connect overlay to feed A transcript stream (requires #4, #15)
+
+**Phase 4: DOM Mapping and Smart Fill**
+10. **PR #13** - DOM map WebSocket flow (requires #3, #4)
+11. **PR #21** - DOM mapping snapshot and smart fill executor (requires #13)
+12. **PR #23** - MCP Smart Fill plan execution and safety (requires #21)
 
 ### Conflict Resolution Notes
 Each PR will need to be rebased onto main after the previous PR is merged. Consider:
@@ -193,15 +227,98 @@ cd backend && npm run typecheck
 
 ---
 
+## Additional PRs (Not Previously Documented)
+
+### PR #19: Connect overlay to feed A transcript stream
+**Branch:** `codex/connect-overlay-ws-client-to-feed-a`  
+**Summary:**
+- Adds feed client to listen to feed A websocket messages
+- Forwards diarized transcript updates to the overlay
+- Includes reconnection/error handling
+
+### PR #20: Add transcript batching and retrieval endpoint
+**Branch:** `codex/finalize-deepgram-consumer-handlers`  
+**Summary:**
+- Batches Deepgram transcripts before persisting
+- Flushes on utterance ends and disconnects
+- Exposes GET /transcripts/:id for fetching transcript runs
+
+### PR #21: Add DOM mapping snapshot and smart fill executor
+**Branch:** `codex/implement-dom-mapper-and-smart-fill-executor`  
+**Summary:**
+- Adds DOM mapping snapshot support
+- Implements Smart Fill executor with undo stubs
+- Surfaces patient hints to overlay mapping tab
+
+### PR #22: Add feed status diagnostics and autopilot readiness UI
+**Branch:** `codex/emit-feed-status-events-and-render-ui`  
+**Summary:**
+- Emits backend feed status events
+- Surfaces feed/autopilot badges in overlay header
+- Calculates DOM coverage for autopilot readiness
+
+### PR #23: Add MCP Smart Fill plan execution and safety interlocks
+**Branch:** `codex/implement-mcp-script-hooks-for-tab-flows`  
+**Summary:**
+- Adds MCP command to execute Smart Fill plans
+- Enforces patient-context safety checks
+- Implements content-side handlers for plan steps
+
+### PR #24: Add tab-aware websocket binding and overlay filtering
+**Branch:** `codex/add-tab-registry-and-audio-binding`  
+**Summary:**
+- Registers tabs on websocket broker using hello messages
+- Handles bind_audio to start tab-scoped Deepgram runs
+- Filters overlay transcript display by tab
+
+---
+
 ## Summary Statistics
 
-| PR | Files Changed | Additions | Deletions | Review Comments |
-|----|---------------|-----------|-----------|-----------------|
-| #3 | - | - | - | 9 |
-| #4 | - | - | - | 12 |
-| #9 | 3 | 211 | 34 | 5 |
-| #11 | 10 | 560 | 9 | 6 |
-| #13 | 8 | 562 | 7 | 13 |
-| #15 | 10 | 947 | 138 | 10 |
+| PR | Files Changed | Additions | Deletions | Status |
+|----|---------------|-----------|-----------|--------|
+| #3 | 3 | 308 | 24 | Needs Rebase |
+| #4 | 8 | 662 | 56 | Needs Rebase |
+| #9 | 3 | 211 | 34 | Needs Rebase |
+| #11 | 10 | 560 | 9 | Needs Rebase |
+| #13 | 8 | 562 | 7 | Needs Rebase |
+| #15 | 10 | 947 | 138 | Needs Rebase |
+| #19 | - | - | - | Needs Rebase |
+| #20 | - | - | - | Needs Rebase |
+| #21 | - | - | - | Needs Rebase |
+| #22 | - | - | - | Needs Rebase |
+| #23 | - | - | - | Needs Rebase |
+| #24 | - | - | - | Needs Rebase |
 
-**Total Review Items:** 55 comments across all PRs
+**Total Review Items:** Approximately 55 documented comments across PRs (additional items may exist in PRs #19-#24)
+
+---
+
+## Manual Merge Instructions
+
+Since all PRs have merge conflicts, the repository owner should:
+
+1. **Review each PR** for the documented issues above
+2. **Rebase each branch** onto main in the recommended order
+3. **Resolve conflicts** as they arise
+4. **Run type checking** after each merge:
+   ```bash
+   cd apps/cns-agent && npm run typecheck
+   cd apps/overlay && npm run typecheck
+   cd backend && npm run typecheck
+   ```
+5. **Merge via GitHub UI** using squash or merge commit as preferred
+
+Alternatively, create a consolidated feature branch:
+```bash
+git checkout main
+git pull origin main
+git checkout -b feature/consolidate-all-prs
+
+# Merge each branch in order, resolving conflicts
+git merge origin/codex/extend-session-handling-and-audio-control
+# ... resolve conflicts ...
+git commit
+
+# Continue with remaining branches
+```
