@@ -42,6 +42,7 @@ export class FeedClient {
   private readonly feedId: string;
   private reconnectAttempts = 0;
   private readonly maxReconnectAttempts: number;
+  private shouldReconnect = false;
 
   constructor(bridge: Bridge, tabId: string, options: FeedClientOptions = {}) {
     this.bridge = bridge;
@@ -52,6 +53,10 @@ export class FeedClient {
   }
 
   public connect(): void {
+    if (this.websocket && this.websocket.readyState === WebSocket.OPEN) return;
+
+    this.shouldReconnect = true;
+
     try {
       this.websocket = new WebSocket(this.websocketUrl);
       this.websocket.onopen = () => this.handleOpen();
@@ -64,6 +69,20 @@ export class FeedClient {
         error: 'ASR feed unavailable. Retrying...',
         tabId: this.tabId
       });
+    }
+  }
+
+  public disconnect(): void {
+    this.shouldReconnect = false;
+    this.reconnectAttempts = 0;
+
+    if (this.websocket) {
+      this.websocket.onclose = null;
+      this.websocket.onerror = null;
+      this.websocket.onmessage = null;
+      this.websocket.onopen = null;
+      this.websocket.close();
+      this.websocket = null;
     }
   }
 
@@ -147,6 +166,10 @@ export class FeedClient {
 
   private handleClose(): void {
     this.bridge.emit('connection', { connected: false, tabId: this.tabId });
+
+    if (!this.shouldReconnect) {
+      return;
+    }
 
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       this.bridge.emit('server-error', {

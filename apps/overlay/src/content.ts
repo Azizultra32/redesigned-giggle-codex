@@ -33,9 +33,6 @@ async function initializeOverlay(): Promise<void> {
     // Initialize audio capture system
     const audioCapture = new AudioCapture(bridge, {}, tabId);
 
-    // Initialize listener for feed A websocket events
-    const feedClient = new FeedClient(bridge, tabId, { feedId: 'A' });
-
     // Initialize DOM mapper for field detection
     const domMapper = new DOMMapper(bridge);
 
@@ -44,13 +41,12 @@ async function initializeOverlay(): Promise<void> {
     overlay.mount();
 
     // Setup bridge handlers
-    setupBridgeHandlers(bridge, audioCapture, domMapper, tabId);
+    setupBridgeHandlers(bridge, audioCapture, domMapper, tabId, () =>
+      new FeedClient(bridge, tabId, { feedId: 'A' })
+    );
 
     // Connect to background service worker
     await bridge.connect();
-
-    // Begin listening for server-side feed events (diarization + interim/final)
-    feedClient.connect();
 
     await overlay.sendHello();
 
@@ -64,13 +60,20 @@ function setupBridgeHandlers(
   bridge: Bridge,
   audioCapture: AudioCapture,
   domMapper: DOMMapper,
-  localTabId: string
+  localTabId: string,
+  feedClientFactory: () => FeedClient
 ): void {
+  let feedClient: FeedClient | null = null;
+
   // Handle recording commands
   bridge.on('start-recording', async (payload: { tabId?: string }) => {
     if (payload?.tabId && payload.tabId !== localTabId) return;
     try {
       await audioCapture.start();
+      if (!feedClient) {
+        feedClient = feedClientFactory();
+      }
+      feedClient.connect();
       bridge.emit('recording-started', { tabId: localTabId });
     } catch (error) {
       console.error('[GHOST-NEXT] Failed to start recording:', error);
@@ -82,6 +85,8 @@ function setupBridgeHandlers(
     if (payload?.tabId && payload.tabId !== localTabId) return;
     try {
       await audioCapture.stop();
+      feedClient?.disconnect();
+      feedClient = null;
       bridge.emit('recording-stopped', { tabId: localTabId });
     } catch (error) {
       console.error('[GHOST-NEXT] Failed to stop recording:', error);
