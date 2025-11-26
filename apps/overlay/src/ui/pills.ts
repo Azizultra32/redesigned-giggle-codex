@@ -5,7 +5,7 @@
  * as compact pill-shaped badges in the header.
  */
 
-import { PatientInfo } from '../overlay';
+import { PatientInfo } from '../domMapper';
 
 export interface PillsState {
   isConnected: boolean;

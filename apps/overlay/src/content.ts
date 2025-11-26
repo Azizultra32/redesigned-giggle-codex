@@ -20,6 +20,8 @@ if ((window as any).__GHOST_NEXT_INJECTED__) {
   initializeOverlay();
 }
 
+const tabId = `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
 async function initializeOverlay(): Promise<void> {
   console.log('[GHOST-NEXT] Initializing Ferrari Overlay...');
 
@@ -28,20 +30,22 @@ async function initializeOverlay(): Promise<void> {
     const bridge = new Bridge();
 
     // Initialize audio capture system
-    const audioCapture = new AudioCapture(bridge);
+    const audioCapture = new AudioCapture(bridge, {}, tabId);
 
     // Initialize DOM mapper for field detection
     const domMapper = new DOMMapper(bridge);
 
     // Create and mount the overlay
-    const overlay = new FerrariOverlay(bridge);
+    const overlay = new FerrariOverlay(bridge, domMapper, tabId);
     overlay.mount();
 
     // Setup bridge handlers
-    setupBridgeHandlers(bridge, audioCapture, domMapper);
+    setupBridgeHandlers(bridge, audioCapture, domMapper, tabId);
 
     // Connect to background service worker
     await bridge.connect();
+
+    await overlay.sendHello();
 
     console.log('[GHOST-NEXT] Ferrari Overlay initialized successfully');
   } catch (error) {
@@ -52,23 +56,26 @@ async function initializeOverlay(): Promise<void> {
 function setupBridgeHandlers(
   bridge: Bridge,
   audioCapture: AudioCapture,
-  domMapper: DOMMapper
+  domMapper: DOMMapper,
+  localTabId: string
 ): void {
   // Handle recording commands
-  bridge.on('start-recording', async () => {
+  bridge.on('start-recording', async (payload: { tabId?: string }) => {
+    if (payload?.tabId && payload.tabId !== localTabId) return;
     try {
       await audioCapture.start();
-      bridge.emit('recording-started', {});
+      bridge.emit('recording-started', { tabId: localTabId });
     } catch (error) {
       console.error('[GHOST-NEXT] Failed to start recording:', error);
-      bridge.emit('recording-error', { error: String(error) });
+      bridge.emit('recording-error', { error: String(error), tabId: localTabId });
     }
   });
 
-  bridge.on('stop-recording', async () => {
+  bridge.on('stop-recording', async (payload: { tabId?: string }) => {
+    if (payload?.tabId && payload.tabId !== localTabId) return;
     try {
       await audioCapture.stop();
-      bridge.emit('recording-stopped', {});
+      bridge.emit('recording-stopped', { tabId: localTabId });
     } catch (error) {
       console.error('[GHOST-NEXT] Failed to stop recording:', error);
     }
@@ -77,12 +84,16 @@ function setupBridgeHandlers(
   // Handle DOM mapping commands
   bridge.on('map-fields', () => {
     const fields = domMapper.detectFields();
-    bridge.emit('fields-detected', { fields });
+    bridge.emit('fields-detected', { fields, tabId: localTabId });
   });
 
   bridge.on('get-patient-info', () => {
     const patientInfo = domMapper.extractPatientInfo();
-    bridge.emit('patient', patientInfo);
+    if (patientInfo) {
+      bridge.emit('patient', { ...patientInfo, tabId: localTabId });
+    } else {
+      bridge.emit('patient', { tabId: localTabId });
+    }
   });
 
   // Handle messages from background service worker

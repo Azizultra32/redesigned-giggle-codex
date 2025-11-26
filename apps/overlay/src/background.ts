@@ -7,6 +7,7 @@
 
 // Track connected content scripts
 const connectedPorts: Map<number, chrome.runtime.Port> = new Map();
+const tabMetadata: Map<number, { overlayTabId?: string; url?: string; patientHints?: unknown }> = new Map();
 
 // Listen for connections from content scripts
 chrome.runtime.onConnect.addListener((port) => {
@@ -25,7 +26,10 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     console.log(`[Background] Content script disconnected from tab ${tabId}`);
     connectedPorts.delete(tabId);
+    tabMetadata.delete(tabId);
   });
+
+  sendActiveState();
 });
 
 // Handle messages from content scripts
@@ -33,6 +37,15 @@ function handleContentMessage(tabId: number, message: { type: string; data?: unk
   console.log(`[Background] Message from tab ${tabId}:`, message.type);
 
   switch (message.type) {
+    case 'hello':
+      tabMetadata.set(tabId, {
+        overlayTabId: (message.data as any)?.tabId,
+        url: (message.data as any)?.url,
+        patientHints: (message.data as any)?.patientHints
+      });
+      sendActiveState();
+      break;
+
     case 'recording-started':
       updateBadge(tabId, 'REC', '#e63946');
       break;
@@ -52,6 +65,28 @@ function handleContentMessage(tabId: number, message: { type: string; data?: unk
       // Forward other messages as needed
       break;
   }
+}
+
+function sendActiveState(activeTabId?: number) {
+  const updateWithActiveId = (targetActiveId?: number) => {
+    connectedPorts.forEach((port, portTabId) => {
+      const overlayTabId = tabMetadata.get(portTabId)?.overlayTabId;
+      if (!overlayTabId) return;
+      port.postMessage({
+        type: 'active_tab_changed',
+        data: { tabId: overlayTabId, isActive: targetActiveId ? portTabId === targetActiveId : false }
+      });
+    });
+  };
+
+  if (typeof activeTabId === 'number') {
+    updateWithActiveId(activeTabId);
+    return;
+  }
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    updateWithActiveId(tabs[0]?.id);
+  });
 }
 
 // Update extension badge for a tab
@@ -78,6 +113,16 @@ chrome.action.onClicked.addListener((tab) => {
     }).catch(err => {
       console.error('[Background] Failed to inject content script:', err);
     });
+  }
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  sendActiveState(tabId);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.active) {
+    sendActiveState(tabId);
   }
 });
 
