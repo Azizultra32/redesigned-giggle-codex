@@ -29,6 +29,31 @@ export interface Session {
   isRecording: boolean;
 }
 
+interface DomFieldDescriptor {
+  selector: string;
+  label?: string;
+  fieldType?: string;
+  value?: string;
+}
+
+interface DomMapPayload {
+  patient?: {
+    name?: string;
+    mrn?: string;
+    dob?: string;
+  };
+  fields?: DomFieldDescriptor[];
+  url?: string;
+}
+
+interface FillStep {
+  selector: string;
+  value: string;
+  action: 'set_text';
+  fieldType?: string;
+  label?: string;
+}
+
 export interface BrokerConfig {
   saveInterval: number; // ms between chunk saves
 }
@@ -110,6 +135,10 @@ export class WebSocketBroker {
 
       case 'set_patient':
         await this.setPatient(session, message);
+        break;
+
+      case 'dom_map':
+        this.handleDomMap(session, message);
         break;
 
       case 'ping':
@@ -220,6 +249,63 @@ export class WebSocketBroker {
     } catch (error: any) {
       this.send(ws, { type: 'error', error: error.message });
     }
+  }
+
+  private handleDomMap(session: Session, message: { domMap?: DomMapPayload; requestId?: string; tabId?: string }): void {
+    const { ws } = session;
+    const domMap = message.domMap || {};
+    const patient = domMap.patient || {};
+    const desiredName = patient.name || 'Auto Patient';
+    const desiredMrn = patient.mrn || 'AUTO-MRN-0001';
+    const steps: FillStep[] = [];
+
+    const fields = Array.isArray(domMap.fields) ? domMap.fields : [];
+
+    for (const field of fields) {
+      if (!field.selector) continue;
+      if (field.fieldType === 'patient_name') {
+        steps.push({
+          selector: field.selector,
+          value: desiredName,
+          action: 'set_text',
+          fieldType: 'patient_name',
+          label: field.label
+        });
+        continue;
+      }
+
+      if (field.fieldType === 'mrn') {
+        steps.push({
+          selector: field.selector,
+          value: desiredMrn,
+          action: 'set_text',
+          fieldType: 'mrn',
+          label: field.label
+        });
+        continue;
+      }
+    }
+
+    // Deterministic fallback: populate first two fields with recognizable tokens
+    if (steps.length === 0 && fields.length > 0) {
+      const fillerValues = ['Automated Fill 1', 'Automated Fill 2'];
+      fields.slice(0, fillerValues.length).forEach((field, idx) => {
+        steps.push({
+          selector: field.selector,
+          value: fillerValues[idx],
+          action: 'set_text',
+          fieldType: field.fieldType,
+          label: field.label
+        });
+      });
+    }
+
+    this.send(ws, {
+      type: 'fill_steps',
+      tabId: message.tabId,
+      requestId: message.requestId,
+      steps
+    });
   }
 
   private handleTranscript(session: Session, event: TranscriptEvent): void {

@@ -11,6 +11,7 @@ import { FerrariOverlay } from './overlay';
 import { Bridge } from './bridge';
 import { AudioCapture } from './audio-capture';
 import { DOMMapper } from './domMapper';
+import { DomMapClient } from './domMapClient';
 
 // Prevent multiple injections
 if ((window as any).__GHOST_NEXT_INJECTED__) {
@@ -35,12 +36,15 @@ async function initializeOverlay(): Promise<void> {
     // Initialize DOM mapper for field detection
     const domMapper = new DOMMapper(bridge);
 
+    // Initialize DOM map client for backend coordination
+    const domMapClient = new DomMapClient(bridge, domMapper, tabId);
+
     // Create and mount the overlay
-    const overlay = new FerrariOverlay(bridge, domMapper, tabId);
+    const overlay = new FerrariOverlay(bridge, domMapper, domMapClient, tabId);
     overlay.mount();
 
     // Setup bridge handlers
-    setupBridgeHandlers(bridge, audioCapture, domMapper, tabId);
+    setupBridgeHandlers(bridge, audioCapture, domMapper, domMapClient, tabId);
 
     // Connect to background service worker
     await bridge.connect();
@@ -57,6 +61,7 @@ function setupBridgeHandlers(
   bridge: Bridge,
   audioCapture: AudioCapture,
   domMapper: DOMMapper,
+  domMapClient: DomMapClient,
   localTabId: string
 ): void {
   // Handle recording commands
@@ -85,6 +90,9 @@ function setupBridgeHandlers(
   bridge.on('map-fields', () => {
     const fields = domMapper.detectFields();
     bridge.emit('fields-detected', { fields, tabId: localTabId });
+    domMapClient.sendDomMap().catch(error => {
+      console.error('[GHOST-NEXT] Failed to send DOM map:', error);
+    });
   });
 
   bridge.on('get-patient-info', () => {
