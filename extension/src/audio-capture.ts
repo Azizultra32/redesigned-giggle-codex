@@ -173,6 +173,15 @@ export class AudioCapture {
           });
           break;
 
+        case 'feed_status':
+          this.bridge.emit('feed-status', {
+            status: message.status,
+            transcriptId: message.transcriptId,
+            isRecording: message.isRecording,
+            userId: message.userId
+          });
+          break;
+
         case 'error':
           console.error('[AudioCapture] Server error:', message.error);
           this.bridge.emit('server-error', { error: message.error });

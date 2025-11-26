@@ -10,14 +10,20 @@ import { ControlButtons } from './ui/buttons';
 import { TabsComponent } from './ui/tabs';
 import { StatusPills } from './ui/pills';
 import { Bridge } from './bridge';
+import { DebugPanel } from './ui/debug';
 
 export interface OverlayState {
   isVisible: boolean;
   isRecording: boolean;
   isConnected: boolean;
-  activeTab: 'transcript' | 'mapping' | 'settings';
+  activeTab: 'transcript' | 'mapping' | 'settings' | 'debug';
   transcriptLines: TranscriptLine[];
   patientInfo: PatientInfo | null;
+  feedStatus: 'connected' | 'recording' | 'stopped' | 'disconnected' | 'error';
+  domCoverage: number;
+  transcriptAvailable: boolean;
+  autopilotReady: boolean;
+  autopilotMessage: string;
 }
 
 export interface TranscriptLine {
@@ -45,6 +51,7 @@ export class FerrariOverlay {
   private controlButtons: ControlButtons;
   private tabs: TabsComponent;
   private statusPills: StatusPills;
+  private debugPanel: DebugPanel;
 
   constructor(bridge: Bridge) {
     this.bridge = bridge;
@@ -62,6 +69,7 @@ export class FerrariOverlay {
     this.controlButtons = new ControlButtons(this.shadowRoot, this.handleControlAction.bind(this));
     this.tabs = new TabsComponent(this.shadowRoot, this.handleTabChange.bind(this));
     this.statusPills = new StatusPills(this.shadowRoot);
+    this.debugPanel = new DebugPanel(this.shadowRoot);
 
     this.setupEventListeners();
     this.render();
@@ -74,7 +82,12 @@ export class FerrariOverlay {
       isConnected: false,
       activeTab: 'transcript',
       transcriptLines: [],
-      patientInfo: null
+      patientInfo: null,
+      feedStatus: 'disconnected',
+      domCoverage: 0,
+      transcriptAvailable: false,
+      autopilotReady: false,
+      autopilotMessage: 'Waiting for DOM coverage and transcript'
     };
   }
 
@@ -88,8 +101,21 @@ export class FerrariOverlay {
       this.setState({ isConnected: status.connected });
     });
 
+    this.bridge.on('feed-status', (status: { status: OverlayState['feedStatus'] }) => {
+      this.setState({ feedStatus: status.status });
+    });
+
     this.bridge.on('patient', (info: PatientInfo) => {
       this.setState({ patientInfo: info });
+    });
+
+    this.bridge.on('dom-coverage', (coverage: { coverage: number }) => {
+      const autopilot = this.buildAutopilotStatus(coverage.coverage, this.state.transcriptAvailable);
+      this.setState({
+        domCoverage: coverage.coverage,
+        autopilotReady: autopilot.ready,
+        autopilotMessage: autopilot.message
+      });
     });
 
     // Keyboard shortcut to toggle overlay
@@ -158,7 +184,15 @@ export class FerrariOverlay {
       lines.push(line);
     }
 
-    this.setState({ transcriptLines: lines });
+    const transcriptAvailable = lines.some(line => line.text?.trim());
+    const autopilot = this.buildAutopilotStatus(this.state.domCoverage, transcriptAvailable);
+
+    this.setState({
+      transcriptLines: lines,
+      transcriptAvailable,
+      autopilotReady: autopilot.ready,
+      autopilotMessage: autopilot.message
+    });
     this.transcriptView.updateLines(lines);
   }
 
@@ -181,10 +215,25 @@ export class FerrariOverlay {
     this.statusPills.update({
       isConnected: this.state.isConnected,
       isRecording: this.state.isRecording,
-      patientInfo: this.state.patientInfo
+      patientInfo: this.state.patientInfo,
+      feedStatus: this.state.feedStatus,
+      autopilotReady: this.state.autopilotReady,
+      autopilotMessage: this.state.autopilotMessage,
+      coverage: this.state.domCoverage,
+      transcriptAvailable: this.state.transcriptAvailable
     });
 
     this.tabs.setActiveTab(this.state.activeTab);
+
+    this.debugPanel.update({
+      isConnected: this.state.isConnected,
+      feedStatus: this.state.feedStatus,
+      domCoverage: this.state.domCoverage,
+      transcriptAvailable: this.state.transcriptAvailable,
+      autopilotReady: this.state.autopilotReady,
+      autopilotMessage: this.state.autopilotMessage,
+      isRecording: this.state.isRecording
+    });
   }
 
   private render(): void {
@@ -216,6 +265,7 @@ export class FerrariOverlay {
         <div class="tab-panel hidden" id="settings-panel">
           <p>Settings and configuration</p>
         </div>
+        <div class="tab-panel hidden" id="debug-panel"></div>
       </div>
       <div class="overlay-footer" id="control-buttons"></div>
     `;
@@ -226,11 +276,13 @@ export class FerrariOverlay {
     const pillsContainer = this.shadowRoot.getElementById('status-pills');
     const tabsContainer = this.shadowRoot.getElementById('tabs-container');
     const transcriptPanel = this.shadowRoot.getElementById('transcript-panel');
+    const debugPanel = this.shadowRoot.getElementById('debug-panel');
     const controlsContainer = this.shadowRoot.getElementById('control-buttons');
 
     if (pillsContainer) this.statusPills.mount(pillsContainer);
     if (tabsContainer) this.tabs.mount(tabsContainer);
     if (transcriptPanel) this.transcriptView.mount(transcriptPanel);
+    if (debugPanel) this.debugPanel.mount(debugPanel);
     if (controlsContainer) this.controlButtons.mount(controlsContainer);
 
     // Setup minimize button
@@ -362,5 +414,21 @@ export class FerrariOverlay {
 
   public getState(): OverlayState {
     return { ...this.state };
+  }
+
+  private buildAutopilotStatus(coverage: number, transcriptAvailable: boolean): { ready: boolean; message: string } {
+    if (coverage >= 50 && transcriptAvailable) {
+      return { ready: true, message: 'Ready: coverage + transcript available' };
+    }
+
+    if (!transcriptAvailable && coverage < 50) {
+      return { ready: false, message: 'Waiting for transcript and DOM coverage' };
+    }
+
+    if (!transcriptAvailable) {
+      return { ready: false, message: 'Waiting for transcript from audio feed' };
+    }
+
+    return { ready: false, message: 'Waiting for DOM coverage' };
   }
 }

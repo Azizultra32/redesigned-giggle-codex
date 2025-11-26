@@ -72,6 +72,7 @@ export class WebSocketBroker {
     ws.on('error', (error) => this.handleError(ws, error));
 
     this.send(ws, { type: 'connected', userId });
+    this.sendFeedStatus(session, 'connected');
   }
 
   private async handleMessage(ws: WebSocket, data: RawData): Promise<void> {
@@ -157,10 +158,13 @@ export class WebSocketBroker {
         transcriptId
       });
 
+      this.sendFeedStatus(session, 'recording');
+
       console.log(`[Broker] Recording started: transcript ${transcriptId}`);
     } catch (error: any) {
       console.error('[Broker] Failed to start recording:', error);
       this.send(ws, { type: 'error', error: error.message });
+      this.sendFeedStatus(session, 'error');
     }
   }
 
@@ -199,10 +203,13 @@ export class WebSocketBroker {
         transcriptId
       });
 
+      this.sendFeedStatus(session, 'stopped');
+
       console.log(`[Broker] Recording stopped: transcript ${transcriptId}`);
     } catch (error: any) {
       console.error('[Broker] Failed to stop recording:', error);
       this.send(ws, { type: 'error', error: error.message });
+      this.sendFeedStatus(session, 'error');
     }
   }
 
@@ -292,6 +299,7 @@ export class WebSocketBroker {
         this.stopSaveTimer(session.transcriptId);
         this.savePendingChunks(session);
       }
+      this.sendFeedStatus(session, 'disconnected');
       this.sessions.delete(ws);
     }
   }
@@ -301,7 +309,23 @@ export class WebSocketBroker {
     const session = this.sessions.get(ws);
     if (session) {
       this.send(ws, { type: 'error', error: error.message });
+      this.sendFeedStatus(session, 'error');
     }
+  }
+
+  private sendFeedStatus(
+    session: Session,
+    status: 'connected' | 'recording' | 'stopped' | 'disconnected' | 'error'
+  ): void {
+    const { ws, transcriptId, isRecording, userId } = session;
+
+    this.send(ws, {
+      type: 'feed_status',
+      status,
+      transcriptId,
+      isRecording,
+      userId
+    });
   }
 
   private send(ws: WebSocket, message: object): void {

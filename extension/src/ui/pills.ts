@@ -11,6 +11,11 @@ export interface PillsState {
   isConnected: boolean;
   isRecording: boolean;
   patientInfo: PatientInfo | null;
+  feedStatus: 'connected' | 'recording' | 'stopped' | 'disconnected' | 'error';
+  autopilotReady: boolean;
+  autopilotMessage: string;
+  coverage: number;
+  transcriptAvailable: boolean;
 }
 
 export class StatusPills {
@@ -19,7 +24,12 @@ export class StatusPills {
   private state: PillsState = {
     isConnected: false,
     isRecording: false,
-    patientInfo: null
+    patientInfo: null,
+    feedStatus: 'disconnected',
+    autopilotReady: false,
+    autopilotMessage: 'Waiting for DOM coverage and transcript',
+    coverage: 0,
+    transcriptAvailable: false
   };
 
   constructor(shadowRoot: ShadowRoot) {
@@ -54,6 +64,14 @@ export class StatusPills {
         <span class="pill-dot recording"></span>
         <span class="pill-text">REC</span>
       </span>
+      <span class="status-pill feed-pill" data-status="disconnected">
+        <span class="pill-dot"></span>
+        <span class="pill-text">Feed</span>
+      </span>
+      <span class="status-pill autopilot-pill" data-ready="false" title="">
+        <span class="pill-icon">🤖</span>
+        <span class="pill-text">Autopilot</span>
+      </span>
       <span class="status-pill patient-pill hidden" title="">
         <span class="pill-icon">👤</span>
         <span class="pill-text patient-name"></span>
@@ -83,6 +101,28 @@ export class StatusPills {
     const recordingPill = this.container.querySelector('.recording-pill');
     if (recordingPill) {
       recordingPill.classList.toggle('hidden', !this.state.isRecording);
+    }
+
+    // Update feed pill
+    const feedPill = this.container.querySelector('.feed-pill');
+    if (feedPill) {
+      feedPill.setAttribute('data-status', this.state.feedStatus);
+      const text = feedPill.querySelector('.pill-text');
+      if (text) {
+        text.textContent = this.getFeedLabel();
+      }
+    }
+
+    // Update autopilot pill
+    const autopilotPill = this.container.querySelector('.autopilot-pill');
+    if (autopilotPill) {
+      autopilotPill.setAttribute('data-ready', this.state.autopilotReady ? 'true' : 'false');
+      const text = autopilotPill.querySelector('.pill-text');
+      if (text) {
+        const coverageLabel = `${Math.round(this.state.coverage)}%`;
+        text.textContent = this.state.autopilotReady ? `Ready (${coverageLabel})` : `Pending (${coverageLabel})`;
+      }
+      autopilotPill.setAttribute('title', `${this.state.autopilotMessage}\nTranscript: ${this.state.transcriptAvailable ? 'Available' : 'Waiting'}`);
     }
 
     // Update patient pill
@@ -115,6 +155,18 @@ export class StatusPills {
     if (info.mrn) tooltip += `\nMRN: ${info.mrn}`;
     if (info.dob) tooltip += `\nDOB: ${info.dob}`;
     return tooltip;
+  }
+
+  private getFeedLabel(): string {
+    const labelMap: Record<PillsState['feedStatus'], string> = {
+      connected: 'Feed Connected',
+      recording: 'Feed Recording',
+      stopped: 'Feed Stopped',
+      disconnected: 'Feed Offline',
+      error: 'Feed Error'
+    };
+
+    return labelMap[this.state.feedStatus];
   }
 
   private getStyles(): string {
@@ -172,6 +224,35 @@ export class StatusPills {
       .connection-pill[data-status="disconnected"] {
         background: rgba(244, 67, 54, 0.2);
         color: #f44336;
+      }
+
+      /* Feed status */
+      .feed-pill[data-status="connected"],
+      .feed-pill[data-status="recording"] {
+        background: rgba(129, 140, 248, 0.2);
+        color: #a5b4fc;
+      }
+
+      .feed-pill[data-status="stopped"] {
+        background: rgba(156, 163, 175, 0.2);
+        color: #d1d5db;
+      }
+
+      .feed-pill[data-status="disconnected"],
+      .feed-pill[data-status="error"] {
+        background: rgba(244, 67, 54, 0.2);
+        color: #f87171;
+      }
+
+      /* Autopilot */
+      .autopilot-pill[data-ready="true"] {
+        background: rgba(52, 211, 153, 0.2);
+        color: #34d399;
+      }
+
+      .autopilot-pill[data-ready="false"] {
+        background: rgba(250, 204, 21, 0.2);
+        color: #fbbf24;
       }
 
       /* Recording status */
