@@ -22,6 +22,20 @@ import {
   WsMessage
 } from '../types/index.js';
 
+interface ClientMetadata {
+  tabId?: string;
+  userId?: string;
+}
+
+interface ActiveTabChangedMessage {
+  type: 'active_tab_changed';
+  data: {
+    tabId: string | null;
+    isActive: boolean;
+    userId?: string;
+  };
+}
+
 interface FeedState {
   feed: FeedId;
   label: string;
@@ -29,7 +43,7 @@ interface FeedState {
 }
 
 export class WsBridge {
-  private clients: Set<WebSocket> = new Set();
+  private clients: Map<WebSocket, ClientMetadata> = new Map();
   private feedStates: Map<FeedId, FeedState> = new Map();
 
   constructor() {
@@ -46,8 +60,8 @@ export class WsBridge {
   /**
    * Add a new WebSocket client and hydrate with current state
    */
-  addClient(ws: WebSocket): void {
-    this.clients.add(ws);
+  addClient(ws: WebSocket, metadata: ClientMetadata = {}): void {
+    this.clients.set(ws, metadata);
     console.log(`[WsBridge] Client added, total: ${this.clients.size}`);
 
     // Hydrate client with current feed states
@@ -58,6 +72,14 @@ export class WsBridge {
       this.clients.delete(ws);
       console.log(`[WsBridge] Client removed, total: ${this.clients.size}`);
     });
+  }
+
+  /**
+   * Update client metadata (tab/user association)
+   */
+  updateClientMetadata(ws: WebSocket, metadata: ClientMetadata): void {
+    const existing = this.clients.get(ws) || {};
+    this.clients.set(ws, { ...existing, ...metadata });
   }
 
   /**
@@ -129,7 +151,32 @@ export class WsBridge {
         timestamp: new Date().toISOString()
       }
     };
-    this.broadcast(message);
+    this.broadcast(message, { tabId });
+  }
+
+  /**
+   * Broadcast active tab changes per user
+   */
+  broadcastActiveTabChange(tabId: string | null, userId: string): void {
+    const message: ActiveTabChangedMessage = {
+      type: 'active_tab_changed',
+      data: {
+        tabId,
+        isActive: false,
+        userId
+      }
+    };
+
+    for (const [client, metadata] of this.clients.entries()) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      if (metadata.userId !== userId) continue;
+
+      const isActive = metadata.tabId !== undefined && metadata.tabId === tabId;
+      this.sendToClient(client, {
+        ...message,
+        data: { ...message.data, isActive }
+      });
+    }
   }
 
   /**
@@ -176,19 +223,22 @@ export class WsBridge {
   /**
    * Broadcast a message to all connected clients
    */
-  private broadcast(message: WsMessage): void {
+  private broadcast(message: WsMessage | ActiveTabChangedMessage, filter?: ClientMetadata): void {
     const data = JSON.stringify(message);
-    for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(data);
-      }
+    for (const [client, metadata] of this.clients.entries()) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+
+      if (filter?.userId && metadata.userId !== filter.userId) continue;
+      if (filter?.tabId && metadata.tabId !== filter.tabId) continue;
+
+      client.send(data);
     }
   }
 
   /**
    * Send a message to a specific client
    */
-  private sendToClient(ws: WebSocket, message: WsMessage): void {
+  private sendToClient(ws: WebSocket, message: WsMessage | ActiveTabChangedMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(message));
     }

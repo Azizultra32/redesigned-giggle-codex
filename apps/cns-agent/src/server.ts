@@ -181,6 +181,7 @@ interface Session {
   url?: string;
   patientHint?: PatientHint;
   lastPatientHint?: PatientHint;
+  patientCode?: string;
   transcriptId: number | null;
   deepgram: DeepgramConsumer | null;
   pendingChunks: TranscriptChunk[];
@@ -213,7 +214,7 @@ wss.on('connection', (ws: WebSocket, req) => {
   sessions.set(ws, session);
 
   // Add to WsBridge for Feed status broadcasting
-  wsBridge.addClient(ws);
+  wsBridge.addClient(ws, { userId });
 
   const safelyCleanupSession = async (reason: string) => {
     try {
@@ -283,7 +284,7 @@ async function handleCommand(session: Session, message: any): Promise<void> {
       break;
 
     case 'bind_audio':
-      handleBindAudio(session, message);
+      await handleBindAudio(session, message);
       break;
 
     case 'start_recording':
@@ -324,6 +325,8 @@ function handleHello(session: Session, message: any): void {
 
   addSessionForUser(session);
 
+  wsBridge.updateClientMetadata(session.ws, { tabId: session.tabId || undefined, userId: session.userId });
+
   send(session.ws, {
     type: 'hello_ack',
     tabId: session.tabId,
@@ -333,10 +336,52 @@ function handleHello(session: Session, message: any): void {
 }
 
 /**
+ * Ensure there is a transcript run ready for the session
+ */
+async function ensureTranscriptRun(
+  session: Session,
+  options: { patientHint?: PatientHint; patientCode?: string; patientUuid?: string; forceNew?: boolean } = {}
+): Promise<{ transcriptId: number; patientCode: string }> {
+  const targetHint = options.patientHint ?? session.patientHint ?? null;
+  const hasMismatch = Boolean(session.lastPatientHint) && Boolean(targetHint)
+    ? JSON.stringify(session.lastPatientHint) !== JSON.stringify(targetHint)
+    : false;
+
+  if (hasMismatch) {
+    send(session.ws, {
+      type: 'patient_mismatch',
+      tabId: session.tabId || undefined,
+      message: 'Patient information changed. Starting a new transcript run for this tab.'
+    });
+    session.transcriptId = null;
+  }
+
+  if (session.transcriptId && !options.forceNew && !hasMismatch) {
+    session.patientHint = targetHint;
+    session.lastPatientHint = targetHint ?? session.lastPatientHint;
+    if (!session.patientCode) {
+      session.patientCode = options.patientCode || generateEphemeralPatientCode();
+    }
+
+    return { transcriptId: session.transcriptId, patientCode: session.patientCode };
+  }
+
+  const patientCode = options.patientCode || generateEphemeralPatientCode();
+  const transcriptId = await createTranscriptRun(session.userId, patientCode, options.patientUuid || null);
+
+  session.patientHint = targetHint;
+  session.lastPatientHint = targetHint;
+  session.transcriptId = transcriptId;
+  session.patientCode = patientCode;
+
+  return { transcriptId, patientCode };
+}
+
+/**
  * Bind audio input to a specific tab for the user
  */
-function handleBindAudio(session: Session, message: any): void {
-  const { tabId } = message;
+async function handleBindAudio(session: Session, message: any): Promise<void> {
+  const { tabId, patientHint, patientCode, patientUuid } = message;
   const targetTabId = tabId || session.tabId;
 
   if (!targetTabId) {
@@ -349,6 +394,15 @@ function handleBindAudio(session: Session, message: any): void {
     send(session.ws, { type: 'error', error: `Tab ${targetTabId} not registered for user` });
     return;
   }
+
+  const targetSession = userSessions.get(targetTabId)!;
+  const incomingHint = patientHint ?? targetSession.patientHint ?? null;
+
+  await ensureTranscriptRun(targetSession, {
+    patientHint: incomingHint,
+    patientCode,
+    patientUuid
+  });
 
   const currentActive = activeTabByUser.get(session.userId);
   if (currentActive === targetTabId) {
@@ -382,21 +436,11 @@ async function startRecording(session: Session, message: any): Promise<void> {
     const patientHint = message.patientHint ?? session.patientHint ?? null;
     session.patientHint = patientHint;
 
-    if (session.lastPatientHint && session.lastPatientHint !== patientHint) {
-      console.log(`[Server] Patient hint changed for user ${session.userId} (tab ${session.tabId}), starting new transcript run`);
-      session.transcriptId = null;
-    }
-
-    // Generate ephemeral patient code
-    const patientCode = message.patientCode || generateEphemeralPatientCode();
-
-    // Create transcript run in Supabase
-    const transcriptId = await createTranscriptRun(
-      session.userId,
-      patientCode,
-      message.patientUuid || null
-    );
-    session.transcriptId = transcriptId;
+    const { transcriptId, patientCode } = await ensureTranscriptRun(session, {
+      patientHint,
+      patientCode: message.patientCode,
+      patientUuid: message.patientUuid
+    });
 
     // Initialize Deepgram
     session.deepgram = new DeepgramConsumer({
@@ -564,8 +608,10 @@ function broadcastActiveTabChange(userId: string, tabId: string | null): void {
   if (!userSessions) return;
 
   for (const session of userSessions.values()) {
-    send(session.ws, { type: 'active_tab_changed', tabId });
+    send(session.ws, { type: 'active_tab_changed', tabId, isActive: session.tabId === tabId });
   }
+
+  wsBridge.broadcastActiveTabChange(tabId, userId);
 }
 
 function isActiveSession(session: Session): boolean {

@@ -11,6 +11,7 @@ export interface PillsState {
   isConnected: boolean;
   isRecording: boolean;
   patientInfo: PatientInfo | null;
+  isActive: boolean;
 }
 
 export class StatusPills {
@@ -19,7 +20,8 @@ export class StatusPills {
   private state: PillsState = {
     isConnected: false,
     isRecording: false,
-    patientInfo: null
+    patientInfo: null,
+    isActive: true
   };
 
   constructor(shadowRoot: ShadowRoot) {
@@ -54,6 +56,10 @@ export class StatusPills {
         <span class="pill-dot recording"></span>
         <span class="pill-text">REC</span>
       </span>
+      <span class="status-pill active-pill" data-status="active">
+        <span class="pill-dot"></span>
+        <span class="pill-text">Active</span>
+      </span>
       <span class="status-pill patient-pill hidden" title="">
         <span class="pill-icon">👤</span>
         <span class="pill-text patient-name"></span>
@@ -83,6 +89,16 @@ export class StatusPills {
     const recordingPill = this.container.querySelector('.recording-pill');
     if (recordingPill) {
       recordingPill.classList.toggle('hidden', !this.state.isRecording);
+    }
+
+    // Update active tab pill
+    const activePill = this.container.querySelector('.active-pill');
+    if (activePill) {
+      activePill.setAttribute('data-status', this.state.isActive ? 'active' : 'inactive');
+      const text = activePill.querySelector('.pill-text');
+      if (text) {
+        text.textContent = this.state.isActive ? 'Active Tab' : 'Inactive';
+      }
     }
 
     // Update patient pill
@@ -185,6 +201,17 @@ export class StatusPills {
         background: rgba(33, 150, 243, 0.2);
         color: #64b5f6;
         cursor: help;
+      }
+
+      /* Active tab pill */
+      .active-pill[data-status="active"] {
+        background: rgba(76, 175, 80, 0.2);
+        color: #4caf50;
+      }
+
+      .active-pill[data-status="inactive"] {
+        background: rgba(255, 193, 7, 0.2);
+        color: #ffb300;
       }
     `;
   }
