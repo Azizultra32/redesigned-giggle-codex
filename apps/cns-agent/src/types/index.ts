@@ -148,11 +148,35 @@ export interface BoundPatient {
 // ============================================================================
 
 export interface DomMap {
+  /**
+   * Medical record number extracted from the host EHR.
+   */
   mrn?: string;
+
+  /**
+   * Patient name as displayed in the current chart context.
+   */
   name?: string;
+
+  /**
+   * Date of birth value, if available.
+   */
   dob?: string;
+
+  /**
+   * Encounter date (visit date) if surfaced on the page.
+   */
   encounterDate?: string;
-  [key: string]: any;
+
+  /**
+   * Optional visit location or clinic identifier.
+   */
+  location?: string;
+
+  /**
+   * Optional attending or ordering provider associated with the chart.
+   */
+  provider?: string;
 }
 
 // ============================================================================
