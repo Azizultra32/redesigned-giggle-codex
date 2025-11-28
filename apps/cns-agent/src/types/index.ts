@@ -125,6 +125,23 @@ export interface TranscriptRun {
 }
 
 // ============================================================================
+// Consent Events
+// ============================================================================
+
+export type ConsentEventType = 'audio_consent_granted' | 'audio_consent_revoked' | string;
+
+export interface ConsentEventInput {
+  orgId?: string | null;
+  clinicianId?: string | null;
+  patientRef?: string | null;
+  source: 'browser_overlay' | 'dashboard' | 'api';
+  eventType: ConsentEventType;
+  sessionId?: string | null;
+  tabId?: string | null;
+  meta?: Record<string, unknown>;
+}
+
+// ============================================================================
 // Patient Identity (Two-Phase)
 // ============================================================================
 

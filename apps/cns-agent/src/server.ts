@@ -23,9 +23,10 @@ import {
   updatePatientInfo,
   getTranscript,
   getLatestTranscript,
-  generateEphemeralPatientCode
+  generateEphemeralPatientCode,
+  logConsentEvent
 } from './lib/supabase.js';
-import { TranscriptChunk, TranscriptEvent, DomMap } from './types/index.js';
+import { TranscriptChunk, TranscriptEvent, DomMap, ConsentEventType } from './types/index.js';
 
 // Load environment variables
 config();
@@ -33,6 +34,7 @@ config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const DEMO_DOCTOR_ID = process.env.DEMO_DOCTOR_ID || '00000000-0000-0000-0000-000000000000';
+const DEMO_ORG_ID = process.env.DEMO_ORG_ID || null;
 
 // Middleware
 app.use(cors({
@@ -378,6 +380,33 @@ async function ensureTranscriptRun(
 }
 
 /**
+ * Record consent events whenever the user opts in/out of audio capture
+ */
+async function trackConsentEvent(
+  session: Session,
+  eventType: ConsentEventType,
+  meta: Record<string, unknown> = {}
+): Promise<void> {
+  const patientRef = session.patientCode || (typeof session.patientHint === 'string' ? session.patientHint : null);
+  const sessionId = session.transcriptId ? String(session.transcriptId) : null;
+
+  try {
+    await logConsentEvent({
+      orgId: DEMO_ORG_ID,
+      clinicianId: session.userId,
+      patientRef,
+      source: 'browser_overlay',
+      eventType,
+      sessionId,
+      tabId: session.tabId || undefined,
+      meta
+    });
+  } catch (error) {
+    console.error(`[Server] Failed to log consent event (${eventType}):`, error);
+  }
+}
+
+/**
  * Bind audio input to a specific tab for the user
  */
 async function handleBindAudio(session: Session, message: any): Promise<void> {
@@ -441,6 +470,13 @@ async function startRecording(session: Session, message: any): Promise<void> {
       patientCode: message.patientCode,
       patientUuid: message.patientUuid
     });
+
+    const consentMeta: Record<string, unknown> = {};
+    if (patientHint) consentMeta.patientHint = patientHint;
+    if (message.patientUuid) consentMeta.patientUuid = message.patientUuid;
+    if (patientCode) consentMeta.patientCode = patientCode;
+
+    void trackConsentEvent(session, 'audio_consent_granted', consentMeta);
 
     // Initialize Deepgram
     session.deepgram = new DeepgramConsumer({
@@ -514,6 +550,8 @@ async function stopRecording(session: Session): Promise<void> {
   }
 
   try {
+    void trackConsentEvent(session, 'audio_consent_revoked', { reason: 'stop_recording' });
+
     // Stop Deepgram
     if (session.deepgram) {
       session.deepgram.disconnect();
