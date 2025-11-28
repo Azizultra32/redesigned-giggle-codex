@@ -28,6 +28,21 @@ interface SmartFillStep {
   fieldId?: string;
 }
 
+interface PatientContext {
+  name?: string;
+  mrn?: string;
+  dob?: string;
+}
+
+interface SmartFillStep {
+  action: 'switch-tab' | 'click' | 'type' | 'focus-field' | 'wait';
+  selector?: string;
+  value?: string;
+  description?: string;
+  durationMs?: number;
+  fieldId?: string;
+}
+
 // Prevent multiple injections
 if ((window as any).__GHOST_NEXT_INJECTED__) {
   console.log('[GHOST-NEXT] Already injected, skipping...');
