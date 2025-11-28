@@ -17,6 +17,7 @@
   },
   "include": [
     "server.ts",
+    "types.ts",
     "supabase/**/*",
     "audio/**/*",
     "ws/**/*",
