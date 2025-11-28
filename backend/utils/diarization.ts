@@ -1,162 +1,151 @@
-/**
- * Diarization Utilities
- *
- * Chunk aggregation logic for transcript assembly.
- * Rules: Start new chunk on speaker change OR duration > 30s
- */
-
-export interface WordResult {
-  word: string;
+export interface DiarizationWord {
+  text: string;
   start: number;
   end: number;
-  confidence: number;
-  speaker: number;
+  speaker?: number | null;
+  punctuated?: string;
 }
 
-export interface AggregatedChunk {
+export interface DiarizedChunk {
   speaker: number;
   text: string;
   start: number;
   end: number;
-  word_count: number;
-  raw: WordResult[];
+  isFinal: boolean;
+  raw?: DeepgramWordLike[];
 }
 
-export interface ChunkAggregatorConfig {
-  maxDurationSeconds: number;
-  onChunkComplete: (chunk: AggregatedChunk) => void;
+export interface DiarizationResult {
+  finalized: DiarizedChunk[];
+  interim: DiarizedChunk | null;
+  fullText: string;
 }
 
-export class ChunkAggregator {
-  private config: ChunkAggregatorConfig;
-  private currentChunk: AggregatedChunk | null = null;
+export interface DiarizationOptions {
+  maxChunkDurationSeconds?: number;
+  fallbackSpeakerId?: number;
+}
 
-  constructor(config: ChunkAggregatorConfig) {
-    this.config = config;
+export interface DeepgramWordLike {
+  word: string;
+  punctuated_word?: string;
+  start: number;
+  end: number;
+  speaker?: number | null;
+}
+
+export interface DeepgramEventLike {
+  is_final?: boolean;
+  channel?: { alternatives?: Array<{ words?: DeepgramWordLike[] }> };
+}
+
+export class DiarizationAssembler {
+  private currentChunk: DiarizedChunk | null = null;
+  private persisted: DiarizedChunk[] = [];
+  private fullText = '';
+  private readonly maxChunkDurationSeconds: number;
+  private readonly fallbackSpeakerId: number;
+
+  constructor(options?: DiarizationOptions) {
+    this.maxChunkDurationSeconds = options?.maxChunkDurationSeconds ?? 30;
+    this.fallbackSpeakerId = options?.fallbackSpeakerId ?? -1;
   }
 
-  /**
-   * Add words to the aggregator
-   * Automatically flushes on speaker change or duration threshold
-   */
-  addWords(words: WordResult[]): void {
+  snapshot(): DiarizationResult {
+    return {
+      finalized: [...this.persisted],
+      interim: this.currentChunk ? { ...this.currentChunk, raw: this.currentChunk.raw } : null,
+      fullText: this.fullText
+    };
+  }
+
+  ingest(words: DiarizationWord[], opts?: { isFinal?: boolean }): DiarizationResult {
     for (const word of words) {
-      this.addWord(word);
+      const speaker = typeof word.speaker === 'number' ? word.speaker : this.fallbackSpeakerId;
+      this.consumeWord({ ...word, speaker });
     }
+
+    if (opts?.isFinal) {
+      this.finalizeCurrentChunk();
+    }
+
+    return this.snapshot();
   }
 
-  /**
-   * Add a single word
-   */
-  addWord(word: WordResult): void {
-    // Start new chunk if none exists
+  ingestDeepgramEvent(event: DeepgramEventLike): DiarizationResult {
+    const alt = event.channel?.alternatives?.[0];
+    const words = alt?.words ?? [];
+    const diarizationWords: DiarizationWord[] = words.map((word) => ({
+      text: word.word,
+      punctuated: word.punctuated_word,
+      start: word.start,
+      end: word.end,
+      speaker: word.speaker
+    }));
+
+    return this.ingest(diarizationWords, { isFinal: event.is_final });
+  }
+
+  private consumeWord(word: DiarizationWord & { speaker: number }): void {
     if (!this.currentChunk) {
       this.startNewChunk(word);
       return;
     }
 
-    // Check if we need to start a new chunk
-    const shouldFlush =
-      // Speaker changed
-      word.speaker !== this.currentChunk.speaker ||
-      // Duration exceeded
-      (word.end - this.currentChunk.start) > this.config.maxDurationSeconds;
+    const speakerChanged = word.speaker !== this.currentChunk.speaker;
+    const durationExceeded = word.end - this.currentChunk.start >= this.maxChunkDurationSeconds;
 
-    if (shouldFlush) {
-      this.flush();
+    if (speakerChanged || durationExceeded) {
+      this.finalizeCurrentChunk();
       this.startNewChunk(word);
-    } else {
-      // Append to current chunk
-      this.currentChunk.raw.push(word);
-      this.currentChunk.end = word.end;
-      this.currentChunk.word_count++;
+      return;
     }
-  }
 
-  /**
-   * Force flush current chunk (e.g., on utterance end)
-   */
-  forceFlush(): void {
-    this.flush();
-  }
-
-  /**
-   * Get current chunk without flushing
-   */
-  getCurrentChunk(): AggregatedChunk | null {
-    return this.currentChunk ? this.buildChunk() : null;
-  }
-
-  private startNewChunk(word: WordResult): void {
-    this.currentChunk = {
-      speaker: word.speaker,
-      text: '',
+    this.currentChunk.text = this.concatWord(this.currentChunk.text, word);
+    this.currentChunk.end = word.end;
+    this.currentChunk.raw?.push({
+      word: word.text,
+      punctuated_word: word.punctuated,
       start: word.start,
       end: word.end,
-      word_count: 1,
-      raw: [word]
+      speaker: word.speaker
+    });
+  }
+
+  private startNewChunk(word: DiarizationWord & { speaker: number }): void {
+    this.currentChunk = {
+      speaker: word.speaker,
+      text: word.punctuated ?? word.text,
+      start: word.start,
+      end: word.end,
+      isFinal: false,
+      raw: [
+        {
+          word: word.text,
+          punctuated_word: word.punctuated,
+          start: word.start,
+          end: word.end,
+          speaker: word.speaker
+        }
+      ]
     };
   }
 
-  private flush(): void {
-    if (!this.currentChunk || this.currentChunk.raw.length === 0) return;
+  private finalizeCurrentChunk(): void {
+    if (!this.currentChunk) return;
 
-    const chunk = this.buildChunk();
-    this.config.onChunkComplete(chunk);
+    const finalized = { ...this.currentChunk, isFinal: true };
+    this.persisted.push(finalized);
+    this.fullText = this.fullText ? `${this.fullText}\n${finalized.text}` : finalized.text;
     this.currentChunk = null;
   }
 
-  private buildChunk(): AggregatedChunk {
-    if (!this.currentChunk) {
-      throw new Error('No current chunk');
+  private concatWord(text: string, word: DiarizationWord): string {
+    if (!text) return word.punctuated ?? word.text;
+    const next = word.punctuated ?? word.text;
+    if (/^[.,!?;:]/.test(next)) {
+      return `${text}${next}`;
     }
-
-    // Build text from raw words with proper spacing
-    const text = this.currentChunk.raw
-      .map((w) => w.word)
-      .join(' ')
-      .replace(/\s+([.,!?;:])/g, '$1'); // Fix punctuation spacing
-
-    return {
-      speaker: this.currentChunk.speaker,
-      text,
-      start: this.currentChunk.start,
-      end: this.currentChunk.end,
-      word_count: this.currentChunk.raw.length,
-      raw: [...this.currentChunk.raw]
-    };
+    return `${text} ${next}`;
   }
-}
-
-/**
- * Format speaker label for display
- * Speaker 0 = Provider, Speaker 1+ = Patient/Other
- */
-export function formatSpeakerLabel(speaker: number): string {
-  if (speaker === 0) return 'Provider';
-  if (speaker === 1) return 'Patient';
-  return `Speaker ${speaker}`;
-}
-
-/**
- * Calculate total duration of chunks
- */
-export function getTotalDuration(chunks: AggregatedChunk[]): number {
-  if (chunks.length === 0) return 0;
-  const start = Math.min(...chunks.map((c) => c.start));
-  const end = Math.max(...chunks.map((c) => c.end));
-  return end - start;
-}
-
-/**
- * Get word count by speaker
- */
-export function getWordCountBySpeaker(
-  chunks: AggregatedChunk[]
-): Record<number, number> {
-  const counts: Record<number, number> = {};
-  for (const chunk of chunks) {
-    counts[chunk.speaker] = (counts[chunk.speaker] || 0) + chunk.word_count;
-  }
-  return counts;
 }

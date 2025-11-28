@@ -1,409 +1,314 @@
-/**
- * WebSocket Broker
- *
- * Manages WebSocket connections between extension and backend.
- * Handles:
- * - /ws: Command/control channel (JSON messages)
- * - Audio streaming to Deepgram
- * - Transcript broadcast to extension
- */
-
-import { WebSocket, WebSocketServer, RawData } from 'ws';
-import { IncomingMessage } from 'http';
-import { DeepgramConsumer, TranscriptEvent } from '../audio/deepgram-consumer.js';
-import { AggregatedChunk } from '../utils/diarization.js';
+import { WebSocketServer, WebSocket } from 'ws';
+import { randomUUID } from 'crypto';
+import {
+  AutopilotMessage,
+  ClientContext,
+  ConsumerState,
+  StatusMessage,
+  TranscriptPayload,
+  TranscriptSession,
+  WsInboundMessage,
+  WsOutboundMessage
+} from '../types.js';
+import { DeepgramConsumer } from '../audio/deepgram-consumer.js';
+import { VADConsumer, mapVadStateToConsumer } from '../audio/vad-consumer.js';
 import {
   createTranscriptRun,
   saveTranscriptChunks,
-  updateTranscriptRun,
-  updatePatientInfo,
-  TranscriptChunk
-} from '../supabase/queries.js';
+  updatePatientLink
+} from '../supabase/transcripts.js';
+import { analyzeDomSnapshot } from '../utils/dom.js';
+import { getPatientCardForUser } from '../utils/patient.js';
 
-export interface Session {
-  ws: WebSocket;
-  userId: string;
-  transcriptId: number | null;
-  deepgram: DeepgramConsumer | null;
-  pendingChunks: TranscriptChunk[];
-  isRecording: boolean;
-  activeTabId: string | null;
-  tabInfo?: TabMetadata;
+export interface BrokerOptions {
+  deepgramApiKey: string;
 }
 
-export interface BrokerConfig {
-  saveInterval: number; // ms between chunk saves
-}
-
-interface TabMetadata {
-  tabId: string;
-  url?: string;
-  title?: string;
-  patientHint?: string;
-}
-
-export class WebSocketBroker {
-  private wss: WebSocketServer;
-  private sessions: Map<WebSocket, Session> = new Map();
-  private config: BrokerConfig;
-  private saveTimers: Map<number, NodeJS.Timeout> = new Map();
-  private tabRegistry: Map<string, TabMetadata & { session: Session }> = new Map();
-
-  constructor(wss: WebSocketServer, config?: Partial<BrokerConfig>) {
-    this.wss = wss;
-    this.config = {
-      saveInterval: 5000,
-      ...config
-    };
-
-    this.wss.on('connection', this.handleConnection.bind(this));
-    console.log('[Broker] WebSocket broker initialized');
-  }
-
-  private async handleConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
-    const url = new URL(req.url || '', 'http://localhost');
-    const userId = url.searchParams.get('userId') || 'anonymous';
-
-    console.log(`[Broker] New connection from user: ${userId}`);
-
-    const session: Session = {
+export function attachBroker(wss: WebSocketServer, options: BrokerOptions): void {
+  wss.on('connection', async (ws) => {
+    const context: ClientContext = {
+      id: randomUUID(),
       ws,
-      userId,
-      transcriptId: null,
-      deepgram: null,
-      pendingChunks: [],
-      isRecording: false,
-      activeTabId: null
+      state: 'idle',
+      session: null,
+      userId: null
     };
 
-    this.sessions.set(ws, session);
+    await sendPatientCard(context);
+    sendStatus(context, { source: 'backend', state: 'idle', message: 'connected' });
 
-    ws.on('message', (data) => this.handleMessage(ws, data));
-    ws.on('close', () => this.handleClose(ws));
-    ws.on('error', (error) => this.handleError(ws, error));
-
-    this.send(ws, { type: 'connected', userId });
-  }
-
-  private async handleMessage(ws: WebSocket, data: RawData): Promise<void> {
-    const session = this.sessions.get(ws);
-    if (!session) return;
-
-    // Binary data = audio
-    if (Buffer.isBuffer(data)) {
-      if (session.deepgram && session.isRecording) {
-        session.deepgram.sendAudio(data);
-      }
-      return;
-    }
-
-    // JSON message
-    try {
-      const message = JSON.parse(data.toString());
-      await this.handleCommand(session, message);
-    } catch (error) {
-      console.error('[Broker] Failed to parse message:', error);
-      this.send(ws, { type: 'error', error: 'Invalid message format' });
-    }
-  }
-
-  private async handleCommand(session: Session, message: any): Promise<void> {
-    const { ws } = session;
-
-    switch (message.type) {
-      case 'hello':
-        this.registerTab(session, message);
-        break;
-
-      case 'bind_audio':
-        await this.bindAudio(session, message);
-        break;
-
-      case 'start_recording':
-        await this.startRecording(session, message);
-        break;
-
-      case 'stop_recording':
-        await this.stopRecording(session);
-        break;
-
-      case 'set_patient':
-        await this.setPatient(session, message);
-        break;
-
-      case 'ping':
-        this.send(ws, { type: 'pong', timestamp: Date.now() });
-        break;
-
-      default:
-        console.warn(`[Broker] Unknown command: ${message.type}`);
-    }
-  }
-
-  private registerTab(session: Session, message: any): void {
-    const tabId = message.tabId ?? message.tabID ?? message.tab_id;
-
-    if (!tabId) {
-      this.send(session.ws, { type: 'error', error: 'tabId is required for hello' });
-      return;
-    }
-
-    const tabKey = String(tabId);
-    const tabInfo: TabMetadata = {
-      tabId: tabKey,
-      url: message.url,
-      title: message.title,
-      patientHint: message.patientHint
-    };
-
-    session.tabInfo = tabInfo;
-    this.tabRegistry.set(tabKey, { ...tabInfo, session });
-
-    console.log(`[Broker] Registered tab ${tabKey} for user ${session.userId}`);
-    this.send(session.ws, { type: 'hello_ack', tabId: tabKey });
-  }
-
-  private async bindAudio(session: Session, message: any): Promise<void> {
-    const tabId = this.getTabIdFromMessage(message, session);
-
-    if (!tabId) {
-      this.send(session.ws, { type: 'error', error: 'tabId is required for bind_audio' });
-      return;
-    }
-
-    await this.startRecordingForTab(session, message, tabId);
-  }
-
-  private getTabIdFromMessage(message: any, session: Session): string | null {
-    const tabId = message.tabId ?? session.tabInfo?.tabId;
-    return tabId ? String(tabId) : null;
-  }
-
-  private async startRecording(session: Session, message: any): Promise<void> {
-    await this.startRecordingForTab(session, message, this.getTabIdFromMessage(message, session));
-  }
-
-  private async startRecordingForTab(
-    session: Session,
-    message: any,
-    tabId: string | null
-  ): Promise<void> {
-    const { ws, userId } = session;
-
-    if (session.isRecording) {
-      this.send(ws, { type: 'error', error: 'Already recording' });
-      return;
-    }
-
-    try {
-      session.activeTabId = tabId;
-
-      const transcriptId = await createTranscriptRun(
-        userId,
-        message.patientCode,
-        message.patientUuid
-      );
-      session.transcriptId = transcriptId;
-
-      session.deepgram = new DeepgramConsumer({
-        onTranscript: (event) => this.handleTranscript(session, event),
-        onChunk: (chunk) => this.handleChunk(session, chunk),
-        onError: (error) =>
-          this.send(ws, { type: 'error', error: error.message, tabId: session.activeTabId || tabId }),
-        onClose: () => this.send(ws, { type: 'deepgram_closed', tabId: session.activeTabId || tabId })
-      });
-
-      await session.deepgram.connect();
-      session.isRecording = true;
-
-      this.startSaveTimer(session);
-
-      this.send(ws, {
-        type: 'recording_started',
-        transcriptId,
-        tabId: session.activeTabId || tabId || undefined
-      });
-
-      console.log(
-        `[Broker] Recording started${session.activeTabId ? ` for tab ${session.activeTabId}` : ''}: transcript ${transcriptId}`
-      );
-    } catch (error: any) {
-      console.error('[Broker] Failed to start recording:', error);
-      this.send(ws, { type: 'error', error: error.message, tabId: session.activeTabId || tabId });
-      session.activeTabId = null;
-    }
-  }
-
-  private async stopRecording(session: Session): Promise<void> {
-    const { ws, transcriptId, deepgram } = session;
-
-    if (!session.isRecording) {
-      this.send(ws, { type: 'error', error: 'Not recording' });
-      return;
-    }
-
-    try {
-      // Stop Deepgram
-      if (deepgram) {
-        deepgram.disconnect();
-        session.deepgram = null;
-      }
-
-      session.isRecording = false;
-
-      // Stop save timer
-      if (transcriptId) {
-        this.stopSaveTimer(transcriptId);
-      }
-
-      // Final save of pending chunks
-      await this.savePendingChunks(session);
-
-      // Mark transcript complete
-      if (transcriptId) {
-        await updateTranscriptRun(transcriptId);
-      }
-
-      this.send(ws, {
-        type: 'recording_stopped',
-        transcriptId,
-        tabId: session.activeTabId || undefined
-      });
-
-      console.log(`[Broker] Recording stopped: transcript ${transcriptId}`);
-    } catch (error: any) {
-      console.error('[Broker] Failed to stop recording:', error);
-      this.send(ws, { type: 'error', error: error.message });
-    }
-
-    session.activeTabId = null;
-  }
-
-  private async setPatient(session: Session, message: any): Promise<void> {
-    const { ws, transcriptId } = session;
-
-    if (!transcriptId) {
-      this.send(ws, { type: 'error', error: 'No active transcript' });
-      return;
-    }
-
-    try {
-      await updatePatientInfo(transcriptId, message.patientCode, message.patientUuid);
-      this.send(ws, { type: 'patient_set', patientCode: message.patientCode });
-    } catch (error: any) {
-      this.send(ws, { type: 'error', error: error.message });
-    }
-  }
-
-  private handleTranscript(session: Session, event: TranscriptEvent): void {
-    // Send to extension for display
-    this.send(session.ws, {
-      type: 'transcript',
-      text: event.text,
-      speaker: event.speaker,
-      isFinal: event.isFinal,
-      start: event.start,
-      end: event.end,
-      tabId: session.activeTabId || undefined
+    ws.on('message', (raw) => handleMessage(context, raw, options));
+    ws.on('close', () => handleClose(context));
+    ws.on('error', (err) => {
+      console.error('[WS] error', err);
+      context.state = 'error';
     });
+  });
+}
+
+type StatusUpdate = Omit<StatusMessage, 'kind'>;
+
+async function handleMessage(
+  context: ClientContext,
+  raw: WebSocket.RawData,
+  options: BrokerOptions
+): Promise<void> {
+  let msg: WsInboundMessage;
+  try {
+    msg = JSON.parse(raw.toString());
+  } catch (err) {
+    console.error('[WS] invalid JSON', err);
+    sendStatus(context, {
+      source: 'backend',
+      state: 'error',
+      message: 'invalid JSON'
+    });
+    return;
   }
 
-  private handleChunk(session: Session, chunk: AggregatedChunk): void {
-    // Queue chunk for batch save
-    session.pendingChunks.push(chunk as TranscriptChunk);
+  if (msg.kind === 'audio') {
+    await handleAudioMessage(context, msg);
+    return;
+  }
 
-    // Send chunk event to extension
-    this.send(session.ws, {
-      type: 'chunk',
+  if (msg.kind === 'event') {
+    await handleEventMessage(context, msg, options);
+    return;
+  }
+
+  sendStatus(context, { source: 'backend', state: 'error', message: 'UNKNOWN_KIND' });
+}
+
+async function handleEventMessage(
+  context: ClientContext,
+  msg: WsInboundMessage & { kind: 'event' },
+  options: BrokerOptions
+): Promise<void> {
+  switch (msg.event) {
+    case 'record-start':
+      await startSession(context, msg, options);
+      break;
+    case 'record-stop':
+      await stopSession(context);
+      break;
+    case 'command':
+      await handleCommand(context, msg);
+      break;
+    default:
+      sendStatus(context, { source: 'backend', state: 'error', message: 'UNKNOWN_EVENT' });
+  }
+}
+
+async function startSession(context: ClientContext, msg: any, options: BrokerOptions): Promise<void> {
+  if (context.session) {
+    sendStatus(context, { source: 'backend', state: 'error', message: 'already recording' });
+    return;
+  }
+
+  const sessionId = msg.sessionId ?? randomUUID();
+
+  let transcriptId: number | null = null;
+  let patientCode: string | null = null;
+
+  try {
+    const result = await createTranscriptRun({
+      userId: context.userId,
+      patientCode: msg.patientContext?.patientCode ?? null,
+      patientUuid: msg.patientContext?.patientUuid ?? null,
+      language: msg.patientContext?.language ?? null
+    });
+    transcriptId = result.id;
+    patientCode = result.patientCode;
+  } catch (err) {
+    console.error('[Broker] failed to create transcript run', err);
+    sendStatus(context, { source: 'supabase', state: 'error', message: 'failed to create transcript' });
+    return;
+  }
+
+  const deepgram = new DeepgramConsumer({
+    apiKey: options.deepgramApiKey,
+    onTranscript: (payload) => handleTranscriptPayload(context, payload),
+    onStatus: (state, message) => sendStatus(context, mapConsumerStatus('deepgram', state, message)),
+    onError: (err) => sendStatus(context, { source: 'deepgram', state: 'error', message: err.message })
+  });
+
+  const vad = new VADConsumer();
+  vad.start({
+    status: (state) => sendStatus(context, mapConsumerStatus('vad', mapVadStateToConsumer(state)))
+  });
+
+  const session: TranscriptSession = {
+    sessionId,
+    transcriptId,
+    userId: context.userId,
+    patientCode,
+    patientUuid: msg.patientContext?.patientUuid ?? null,
+    startedAt: Date.now(),
+    stoppedAt: null,
+    fullText: '',
+    chunks: [],
+    lastSavedChunkCount: 0,
+    deepgram,
+    vad
+  };
+
+  context.session = session;
+  context.state = 'recording';
+
+  try {
+    await deepgram.start();
+  } catch (err) {
+    console.error('[Broker] failed to start deepgram', err);
+    sendStatus(context, { source: 'deepgram', state: 'error', message: (err as Error).message });
+  }
+}
+
+async function stopSession(context: ClientContext): Promise<void> {
+  if (!context.session) return;
+
+  const session = context.session;
+  context.state = 'stopping';
+
+  session.deepgram.stop();
+  session.vad.stop();
+  session.stoppedAt = Date.now();
+
+  await persistChunks(context, true);
+
+  context.session = null;
+  context.state = 'idle';
+  sendStatus(context, { source: 'backend', state: 'idle', message: 'stopped' });
+}
+
+async function handleAudioMessage(context: ClientContext, msg: any): Promise<void> {
+  if (msg.format !== 'pcm16' || msg.sampleRate !== 16000 || !msg.data) {
+    sendStatus(context, { source: 'backend', state: 'error', message: 'invalid audio format' });
+    return;
+  }
+
+  if (!context.session || context.state !== 'recording') {
+    sendStatus(context, { source: 'backend', state: 'error', message: 'not recording' });
+    return;
+  }
+
+  const buffer = Buffer.from(msg.data, 'base64');
+  context.session.deepgram.handleAudio(buffer);
+  context.session.vad.handleAudio(buffer);
+}
+
+async function handleTranscriptPayload(context: ClientContext, payload: TranscriptPayload): Promise<void> {
+  const session = context.session;
+  if (!session) return;
+
+  session.fullText = payload.fullText;
+  session.chunks = payload.finalized;
+
+  await emitTranscriptUpdates(context, payload);
+  await persistChunks(context, false);
+}
+
+async function persistChunks(context: ClientContext, completed: boolean): Promise<void> {
+  const session = context.session;
+  if (!session || session.transcriptId === null) return;
+
+  const finalized = session.chunks;
+  if (finalized.length === 0) return;
+
+  if (session.lastSavedChunkCount === finalized.length && !completed) return;
+
+  try {
+    await saveTranscriptChunks(session.transcriptId, finalized, {
+      fullTranscript: session.fullText,
+      completed
+    });
+    session.lastSavedChunkCount = finalized.length;
+    if (completed) {
+      sendStatus(context, { source: 'supabase', state: 'connected', message: 'transcript saved' });
+    }
+  } catch (err) {
+    console.error('[Broker] failed to persist chunks', err);
+    sendStatus(context, { source: 'supabase', state: 'error', message: 'failed to save transcript' });
+  }
+}
+
+async function emitTranscriptUpdates(context: ClientContext, payload: TranscriptPayload): Promise<void> {
+  const session = context.session;
+  if (!session) return;
+
+  const newFinalized = payload.finalized.slice(session.lastSavedChunkCount);
+  for (const chunk of newFinalized) {
+    send(context, {
+      kind: 'transcript-update',
+      isFinal: true,
       speaker: chunk.speaker,
       text: chunk.text,
-      wordCount: chunk.word_count,
-      duration: chunk.end - chunk.start,
-      tabId: session.activeTabId || undefined
+      chunkStart: chunk.start,
+      chunkEnd: chunk.end
     });
   }
 
-  private startSaveTimer(session: Session): void {
-    if (!session.transcriptId) return;
-
-    const timer = setInterval(async () => {
-      await this.savePendingChunks(session);
-    }, this.config.saveInterval);
-
-    this.saveTimers.set(session.transcriptId, timer);
+  if (payload.interim) {
+    send(context, {
+      kind: 'transcript-update',
+      isFinal: false,
+      speaker: payload.interim.speaker,
+      text: payload.interim.text,
+      chunkStart: payload.interim.start,
+      chunkEnd: payload.interim.end
+    });
   }
+}
 
-  private stopSaveTimer(transcriptId: number): void {
-    const timer = this.saveTimers.get(transcriptId);
-    if (timer) {
-      clearInterval(timer);
-      this.saveTimers.delete(transcriptId);
+async function handleCommand(context: ClientContext, msg: any): Promise<void> {
+  if (msg.commandName === 'MAP_DOM') {
+    const result = analyzeDomSnapshot(msg.domSnapshot);
+    if (context.session?.transcriptId) {
+      await updatePatientLink(context.session.transcriptId, {
+        patientCode: result.patientCode ?? undefined,
+        patientUuid: result.patientUuid ?? undefined
+      });
     }
+
+    const autopilot: AutopilotMessage = {
+      kind: 'autopilot',
+      ready: true,
+      surfacesFound: result.surfacesFound,
+      lastAction: 'mapped_fields'
+    };
+    send(context, autopilot);
   }
+}
 
-  private async savePendingChunks(session: Session): Promise<void> {
-    if (!session.transcriptId || session.pendingChunks.length === 0) return;
-
-    const chunks = [...session.pendingChunks];
-    session.pendingChunks = [];
-
-    try {
-      await saveTranscriptChunks(session.transcriptId, chunks);
-    } catch (error) {
-      // Re-queue chunks on failure
-      session.pendingChunks.unshift(...chunks);
-      console.error('[Broker] Failed to save chunks, will retry:', error);
-    }
+function handleClose(context: ClientContext): void {
+  if (context.session) {
+    context.session.deepgram.stop();
+    context.session.vad.stop();
   }
+  context.state = 'closed';
+}
 
-  private handleClose(ws: WebSocket): void {
-    const session = this.sessions.get(ws);
-    if (session) {
-      console.log(`[Broker] Connection closed: ${session.userId}`);
-      if (session.deepgram) {
-        session.deepgram.disconnect();
-      }
-      if (session.transcriptId) {
-        this.stopSaveTimer(session.transcriptId);
-        this.savePendingChunks(session);
-      }
-      if (session.tabInfo?.tabId) {
-        this.tabRegistry.delete(session.tabInfo.tabId);
-      }
-      this.sessions.delete(ws);
-    }
+function send(context: ClientContext, msg: WsOutboundMessage): void {
+  if (context.ws.readyState !== WebSocket.OPEN) return;
+  try {
+    context.ws.send(JSON.stringify(msg));
+  } catch (err) {
+    console.error('[WS] send error', err);
+    context.state = 'error';
   }
+}
 
-  private handleError(ws: WebSocket, error: Error): void {
-    console.error('[Broker] WebSocket error:', error);
-    const session = this.sessions.get(ws);
-    if (session) {
-      this.send(ws, { type: 'error', error: error.message });
-    }
-  }
+function sendStatus(context: ClientContext, msg: StatusUpdate): void {
+  send(context, { ...msg, kind: 'status' });
+}
 
-  private send(ws: WebSocket, message: object): void {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(message));
-    }
-  }
+function mapConsumerStatus(source: StatusMessage['source'], state: ConsumerState, message?: string): StatusUpdate {
+  const mappedState: StatusMessage['state'] =
+    state === 'closed' ? 'disconnected' : state === 'connecting' ? 'connecting' : state === 'idle' ? 'idle' : state === 'error' ? 'error' : 'connected';
 
-  /**
-   * Broadcast to all connected clients
-   */
-  broadcast(message: object): void {
-    const data = JSON.stringify(message);
-    for (const [ws] of this.sessions) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
-      }
-    }
-  }
+  return { source, state: mappedState, message };
+}
 
-  /**
-   * Get active session count
-   */
-  getSessionCount(): number {
-    return this.sessions.size;
-  }
+async function sendPatientCard(context: ClientContext): Promise<void> {
+  const card = await getPatientCardForUser(context.userId);
+  send(context, { kind: 'patient', data: card });
 }
